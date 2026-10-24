@@ -31,6 +31,8 @@ export function codexArgs(state, dir) {
     ...(value.model ? ['-m', value.model] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
     ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
+    ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+    ...(mode === 'workspace-write' && state.grants?.paths?.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(state.grants.paths)}`] : []),
     ...(session ? ['-c', `sandbox_mode="${mode}"`] : ['--sandbox', mode]),
     '-c', 'approval_policy="never"',
     '--output-schema', schemaPath(state),
@@ -47,9 +49,14 @@ export function claudeArgs(state, sessionId) {
       const path = `${state.target.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
       tools.push(`Edit(${path})`, `Write(${path})`);
     }
-  } else if (state.stage === 'execute') tools.push('Edit', 'Write', 'Bash');
+  } else if (state.stage === 'execute') {
+    tools.push('Edit', 'Write', 'Bash');
+    if (state.grants?.network) tools.push('WebFetch', 'WebSearch');
+  }
+  const granted = state.stage === 'execute' ? state.grants : null;
   return ['-p', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '--tools', 'Read,Glob,Grep,Edit,Write,Bash',
+    '--tools', `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
+    ...(granted?.paths?.length ? ['--add-dir', ...granted.paths] : []),
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
     '--output-format', 'json', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
     ...(session ? ['--resume', session.sessionId] : ['--session-id', sessionId]),

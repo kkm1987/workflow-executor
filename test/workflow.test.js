@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { root, create, load, save, answer, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
+import { homedir } from 'node:os';
+import { root, create, load, save, answer, grant, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
 import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../src/executor.js';
 import { preflight as nativePreflight, checkCommand } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
@@ -253,6 +254,34 @@ test('手戻りが上限を超えると停止する', t => {
   }
   assert.equal(state.status, 'blocked');
   assert.equal(state.revisions, 4);
+});
+
+test('実装の途中終了は正常系で、同じ工程の実行待ちに戻り、上限で停止する', t => {
+  const { state } = fixture(t);
+  state.tasks = [{ ...task, status: 'pending' }];
+  state.stage = 'execute';
+  const partial = { outcome: 'partial', summary: '半分完了', question: '', tasks: [] };
+  advance(state, partial);
+  assert.deepEqual([state.status, state.stage], ['ready', 'execute']);
+  assert.throws(() => validateResult(partial, 'review'), /使えない/);
+  for (let i = 0; i < 10; i++) advance(state, partial);
+  assert.equal(state.status, 'blocked');
+});
+
+test('権限要求は回答待ちになり、許可は保存されて次の実行引数へ反映される', t => {
+  const { state, base } = fixture(t);
+  state.tasks = [{ ...task, status: 'pending' }];
+  state.stage = 'execute';
+  const outside = join(root, 'agent-docs');
+  advance(state, { outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
+  assert.equal(state.status, 'waiting');
+  assert.equal(summary(state, base).permission.network, true);
+  assert.throws(() => grant(state, { paths: [homedir()] }, base), /許可できない/);
+  grant(state, { network: true, paths: [outside] }, base);
+  assert.equal(state.status, 'ready');
+  assert.ok(codexArgs(state, base).includes('sandbox_workspace_write.network_access=true'));
+  assert.ok(codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
+  assert.throws(() => validateResult({ outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
 });
 
 test('実行例外と不正な結果は失敗として永続化され、成功に進まない', async t => {

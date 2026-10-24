@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, readdirSync, existsSync, openSync, closeSync, unlinkSync, realpathSync, statSync } from 'node:fs';
-import { resolve, join, dirname } from 'node:path';
+import { resolve, join, dirname, relative, parse, sep, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { validateModel, stagesFor } from './config.js';
 
@@ -8,13 +9,18 @@ export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const dataRoot = join(root, 'data');
 const now = () => new Date().toISOString();
 const stages = ['plan', 'prereview', 'execute', 'review', 'acceptance'];
+const MAX_PARTIALS = 10;
 
 export function validateResult(result, stage) {
   if (!stages.includes(stage)) throw new Error('工程が不正です');
-  if (!result || !['ok', 'question', 'revise', 'error'].includes(result.outcome) ||
+  if (!result || !['ok', 'question', 'revise', 'error', 'partial', 'permission'].includes(result.outcome) ||
       typeof result.summary !== 'string' || !result.summary.trim() || typeof result.question !== 'string' ||
       !Array.isArray(result.tasks)) throw new Error('工程の応答形式が不正です');
-  if (result.outcome === 'question' && !result.question.trim()) throw new Error('質問が空です');
+  if (['question', 'permission'].includes(result.outcome) && !result.question.trim()) throw new Error('質問が空です');
+  if (['partial', 'permission'].includes(result.outcome) && stage !== 'execute') throw new Error('この工程では使えない結果です');
+  if (result.outcome === 'permission' && !result.permission?.network && !result.permission?.paths?.length) {
+    throw new Error('権限要求にはネットワークまたはパスが必要です');
+  }
   if (result.outcome === 'revise' && !['review', 'acceptance'].includes(stage)) throw new Error('この工程では差し戻せません');
   for (const task of result.tasks) {
     if (typeof task.title !== 'string' || !task.title.trim() ||
@@ -44,12 +50,20 @@ export function advance(state, result) {
     state.question = '';
     return;
   }
-  if (result.outcome === 'question') {
+  if (['question', 'permission'].includes(result.outcome)) {
     state.status = 'waiting';
     state.question = result.question;
+    if (result.outcome === 'permission') state.permission = { network: Boolean(result.permission.network), paths: result.permission.paths ?? [] };
     return;
   }
   delete state.session;
+  if (result.outcome === 'partial') {
+    // 大きなタスク群の途中終了は正常系。tasks.mdの進捗を引き継ぎ、新しいコンテキストで続行する。
+    state.partials = (state.partials ?? 0) + 1;
+    state.status = state.partials > MAX_PARTIALS ? 'blocked' : 'ready';
+    return;
+  }
+  delete state.partials;
   if (result.outcome === 'revise') {
     state.revisions += 1;
     state.status = state.revisions > 3 ? 'blocked' : 'ready';
@@ -124,7 +138,10 @@ export function summary(state, base = dataRoot) {
     completed: state.tasks.filter(task => task.status === 'completed').length,
     total: state.tasks.length, nextAction, updatedAt: state.updatedAt,
   };
-  if (state.status === 'waiting') result.question = state.question;
+  if (state.status === 'waiting') {
+    result.question = state.question;
+    if (state.permission) result.permission = state.permission;
+  }
   if (state.status === 'failed') result.error = state.error;
   if (state.status === 'limited') { result.error = state.error; result.rateLimits = state.rateLimits; }
   if (['completed', 'blocked'].includes(state.status)) result.result = state.lastResult;
@@ -186,9 +203,34 @@ export function answer(state, text, base = dataRoot) {
   if (!text.trim()) throw new Error('回答が空です');
   state.answers.push({ stage: state.stage, question: state.question, answer: text });
   state.question = '';
+  delete state.permission;
   state.status = 'ready';
   event(state, 'answered', state.answers.at(-1), base);
   save(state, base);
+}
+
+const secretDirs = ['.ssh', '.aws', '.gnupg', '.azure', '.kube', '.docker'];
+
+// 権限要求の許可。保存した許可は以後の全工程の実行で有効になり、回答として同じセッションへ伝える。
+export function grant(state, { network = false, paths = [] }, base = dataRoot) {
+  if (state.status !== 'waiting' || !state.permission) throw new Error('権限要求の回答待ちではありません');
+  if (!network && !paths.length) throw new Error('許可するネットワークまたはパスを指定してください');
+  const home = realpathSync(homedir());
+  const resolved = paths.map(path => {
+    const real = realpathSync(resolve(path));
+    // 別ドライブでは相対パスが絶対パスになるため、包含判定から除く。
+    const inside = (parent, child) => { const rel = relative(parent, child); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
+    if (!statSync(real).isDirectory()) throw new Error(`ディレクトリではありません: ${path}`);
+    if (real === parse(real).root || inside(real, home) ||
+        (inside(home, real) && secretDirs.includes(relative(home, real).split(sep)[0]))) throw new Error(`許可できないパスです: ${path}`);
+    return real;
+  });
+  state.grants ??= { network: false, paths: [] };
+  state.grants.network ||= network;
+  state.grants.paths = [...new Set([...state.grants.paths, ...resolved])];
+  const text = `許可しました: ${[network && 'ネットワーク', ...resolved].filter(Boolean).join(', ')}`;
+  event(state, 'granted', { network, paths: resolved }, base);
+  answer(state, text, base);
 }
 
 export const validChangeName = name => typeof name === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
@@ -232,7 +274,7 @@ export function prompt(state) {
   const instruction = {
     plan: '要求整理→粒度判定→設計判定の順に行う。decisions.requirementsに要求と受け入れ条件の判断根拠、decisions.granularityに未完了タスクの粒度と順序の根拠、decisions.architectureに既存構成に基づく最も単純な設計の根拠を記す。差し戻し理由を反映し、検証可能な受け入れ条件を持つ未完了タスクを定義する。',
     prereview: '候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。',
-    execute: '最初の未完了タスクだけを実装し、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。',
+    execute: '最初の未完了タスクだけを実装し、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。許可されるまで推測で回避しない。',
     review: '最初の未完了タスクの実装を独立してレビューする。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
     acceptance: '要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',
   }[state.stage];
@@ -245,5 +287,6 @@ export function prompt(state) {
     (planning
       ? 'この工程のoutcome=okでは、tasksに未完了タスクの完全な順序付き一覧を必ず返す。変更不要でも既存の未完了タスクを返し、空配列にしない。完了タスクは再掲しない。\n'
       : 'この工程ではtasks=[]、decisionsの各値は空文字列とする。\n') +
+    'permissionはoutcome=permission以外ではnetwork=false、paths=[]とする。\n' +
     JSON.stringify({ requirement: state.requirement, change: state.change, candidates: state.candidates, tasks: state.tasks, decisions: state.decisions, answers: state.answers, previous: state.lastResult, evidence: state.evidence ?? [] });
 }

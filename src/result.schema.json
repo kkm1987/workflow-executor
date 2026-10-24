@@ -1,9 +1,15 @@
 {
   "type": "object",
   "properties": {
-    "outcome": { "type": "string", "enum": ["ok", "question", "revise", "error"] },
+    "outcome": { "type": "string", "enum": ["ok", "question", "revise", "error", "partial", "permission"] },
     "summary": { "type": "string" },
     "question": { "type": "string" },
+    "permission": {
+      "type": "object",
+      "properties": { "network": { "type": "boolean" }, "paths": { "type": "array", "items": { "type": "string" } } },
+      "required": ["network", "paths"],
+      "additionalProperties": false
+    },
     "decisions": {
       "type": "object",
       "properties": {
@@ -24,6 +30,6 @@
       }
     }
   },
-  "required": ["outcome", "summary", "question", "decisions", "tasks"],
+  "required": ["outcome", "summary", "question", "permission", "decisions", "tasks"],
   "additionalProperties": false
 }
