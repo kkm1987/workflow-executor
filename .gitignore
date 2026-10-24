@@ -1,0 +1,5 @@
+data/
+agent-docs/
+.venv/
+node_modules/
+.agents/skills/workflow-executor

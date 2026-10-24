@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": { "type": "string", "enum": ["ok", "question", "revise", "error"] },
+    "summary": { "type": "string" },
+    "question": { "type": "string" },
+    "decisions": {
+      "type": "object",
+      "properties": {
+        "requirements": { "type": "string" },
+        "granularity": { "type": "string" },
+        "architecture": { "type": "string" }
+      },
+      "required": ["requirements", "granularity", "architecture"],
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "title": { "type": "string" }, "acceptance": { "type": "string" } },
+        "required": ["title", "acceptance"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["outcome", "summary", "question", "decisions", "tasks"],
+  "additionalProperties": false
+}

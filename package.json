@@ -1,0 +1,16 @@
+{
+  "name": "workflow-executor",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node scripts/verify-e2e.mjs",
+    "workflow": "node src/cli.js"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.10.0"
+  }
+}

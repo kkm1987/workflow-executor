@@ -1,0 +1,7 @@
+schema: spec-driven
+
+context: |
+  Language: ja
+  All artifacts must be written in ja.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
