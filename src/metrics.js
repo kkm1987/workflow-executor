@@ -1,10 +1,23 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export function usage(dir) {
+export function usage(dir, cli = 'codex') {
   const path = join(dir, 'codex.jsonl');
   const totals = { input_tokens: null, cached_input_tokens: null, output_tokens: null };
   const missing = new Set();
+  if (cli === 'claude') {
+    try {
+      const output = JSON.parse(readFileSync(join(dir, 'claude.json'), 'utf8'));
+      const value = output.usage;
+      const integer = number => Number.isSafeInteger(number) && number >= 0;
+      if (integer(value?.input_tokens) && integer(value?.cache_read_input_tokens) && integer(value?.cache_creation_input_tokens)) {
+        totals.input_tokens = value.input_tokens + value.cache_read_input_tokens + value.cache_creation_input_tokens;
+      }
+      if (integer(value?.cache_read_input_tokens)) totals.cached_input_tokens = value.cache_read_input_tokens;
+      if (integer(value?.output_tokens)) totals.output_tokens = value.output_tokens;
+    } catch {}
+    return totals;
+  }
   if (!existsSync(path)) return totals;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     let event;

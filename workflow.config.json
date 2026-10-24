@@ -1,0 +1,18 @@
+{
+  "models": {
+    "request": { "plan": {}, "execute": {}, "review": {}, "acceptance": {} },
+    "change": {
+      "prereview": { "model": "claude-opus-5-5", "effort": "medium" },
+      "execute": { "model": "gpt-6.1-sol", "effort": "low" },
+      "review": { "model": "gpt-6-luna", "effort": "high" },
+      "acceptance": { "model": "gpt-6-luna", "effort": "high" }
+    }
+  },
+  "limits": {
+    "plan": { "primary": 20, "secondary": 10 },
+    "prereview": { "primary": 20, "secondary": 10 },
+    "execute": { "primary": 20, "secondary": 10 },
+    "review": { "primary": 10, "secondary": 5 },
+    "acceptance": { "primary": 10, "secondary": 5 }
+  }
+}

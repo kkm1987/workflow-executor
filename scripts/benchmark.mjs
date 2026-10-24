@@ -3,7 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { root, create, summary } from '../src/workflow.js';
-import { run, runCodex } from '../src/executor.js';
+import { run } from '../src/executor.js';
+import { resolveCodex, capture } from '../src/commands.js';
 import { verify } from '../test/fixtures/expenses/verify.mjs';
 
 const label = process.argv[2];
@@ -12,7 +13,7 @@ const parent = join(root, 'agent-docs');
 mkdirSync(parent, { recursive: true });
 const dir = mkdtempSync(join(parent, `benchmark-${label}-`));
 const conditions = { model: 'gpt-6.1-sol', reasoning: 'low', platform: process.platform, node: process.version,
-  codex: execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim(),
+  codex: (await capture(resolveCodex(), ['--version'], root)).trim(),
   cache: '通常の共有キャッシュを使用。各回のキャッシュ入力を記録し、冷キャッシュとは扱わない。',
   requirement: readFileSync(join(root, 'test/fixtures/expenses/request.md'), 'utf8') };
 writeFileSync(join(dir, 'conditions.json'), JSON.stringify(conditions, null, 2));
@@ -30,7 +31,9 @@ for (let i = 1; i <= 3; i++) {
   for (const [name, content] of Object.entries(originals)) writeFileSync(join(target, name), content);
   const base = join(dir, `data-${i}`);
   const state = create(target, conditions.requirement, base);
-  await run(state, (current, attemptDir) => runCodex(current, attemptDir, 'codex', ['-m', conditions.model, '-c', `model_reasoning_effort="${conditions.reasoning}"`]), base,
+  state.models = Object.fromEntries(['plan', 'execute', 'review', 'acceptance'].map(stage =>
+    [stage, { model: conditions.model, effort: conditions.reasoning }]));
+  await run(state, undefined, base,
     current => console.log(JSON.stringify({ run: i, ...summary(current, base) })));
   if (state.status !== 'completed') throw new Error(`測定停止: ${JSON.stringify(summary(state))}。保存先: ${dir}`);
   const checks = await verify(target);

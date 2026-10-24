@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": { "type": "string", "enum": ["ok", "question", "error"] },
+    "summary": { "type": "string" },
+    "question": { "type": "string" },
+    "change": { "type": "string" },
+    "decisions": {
+      "type": "object",
+      "properties": {
+        "selection": { "type": "string" },
+        "applicability": { "type": "string" },
+        "updates": { "type": "string" }
+      },
+      "required": ["selection", "applicability", "updates"],
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "title": { "type": "string" }, "acceptance": { "type": "string" } },
+        "required": ["title", "acceptance"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["outcome", "summary", "question", "change", "decisions", "tasks"],
+  "additionalProperties": false
+}

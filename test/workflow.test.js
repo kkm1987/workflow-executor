@@ -4,11 +4,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { root, create, load, save, answer, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
-import { step as checkedStep, run as checkedRun, codexArgs, runCodex } from '../src/executor.js';
-import { preflight, checkCommand } from '../src/preflight.js';
+import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../src/executor.js';
+import { preflight as nativePreflight, checkCommand } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
 const passed = async () => ({ ok: true });
+const checkedStep = (state, runner, base, check) => nativeStep(state, runner, base, check, async () => null);
+const checkedRun = (state, runner, base, progress, check) => nativeRun(state, runner, base, progress, check, async () => null);
+const preflight = (state, check) => nativePreflight(state, check, () => 'codex');
 const step = (state, runner, base) => checkedStep(state, runner, base, passed);
 const run = (state, runner, base) => checkedRun(state, runner, base, undefined, passed);
 
@@ -273,14 +276,14 @@ test('排他ロックは二重取得を拒否し、解放後に取得できる',
   lock(base)();
 });
 
-test('実装のみ書き込み可能で、再開や権限回避を使わず新規コンテキストを起動する', t => {
+test('実装のみ書き込み可能で、質問セッションがなければ新規コンテキストを起動する', t => {
   const { state, base } = fixture(t);
   for (const stage of ['plan', 'execute', 'review', 'acceptance']) {
     state.stage = stage;
     const args = codexArgs(state, base);
     assert.equal(args[0], 'exec');
     assert.equal(args[args.indexOf('--sandbox') + 1], stage === 'execute' ? 'workspace-write' : 'read-only');
-    assert.ok(args.includes('--ephemeral'));
+    assert.ok(!args.includes('--ephemeral'));
     assert.ok(args.includes('--output-schema'));
     assert.ok(!args.includes('resume'));
     assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
@@ -426,6 +429,7 @@ test('実装の実行で記録した変更ファイルが保存され、次の�
   assert.deepEqual(saved.evidence[0].changedFiles, ['feature.js']);
   assert.ok(existsSync(saved.evidence[0].before));
   assert.ok(existsSync(saved.evidence[0].after));
+  assert.equal(saved.evidence[0].log, join(base, state.id, 'attempt-0001', 'codex.jsonl'));
   const reviewContext = JSON.parse(prompt(saved).split('\n').at(-1));
   assert.deepEqual(reviewContext.evidence[0].changedFiles, ['feature.js']);
 });

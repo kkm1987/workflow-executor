@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute } from 'node:path';
-import { root, create, answer, lock, summary, load, list, save, event } from '../src/workflow.js';
+import { root, create, answer, lock, summary, load, list, retry } from '../src/workflow.js';
 import { run } from '../src/executor.js';
 
 const parent = join(root, 'agent-docs');
@@ -25,10 +25,7 @@ try {
   const state = resume ? list(base)[0] : create(target, requirement, base);
   assert.equal(state.target, target);
   if (resume && state.status === 'failed') {
-    state.status = 'ready';
-    delete state.error;
-    event(state, 'retry_requested', state.stage, base);
-    save(state, base);
+    retry(state, base);
   }
   const progress = current => console.log(JSON.stringify(summary(current, base)));
   console.log(JSON.stringify({ testDirectory: dir, id: state.id }));
@@ -49,11 +46,16 @@ try {
   for (let attempt = 1; attempt <= state.attempts; attempt++) {
     const events = readFileSync(join(base, state.id, `attempt-${String(attempt).padStart(4, '0')}`, 'codex.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const session = events.find(event => event.type === 'thread.started')?.thread_id;
-    assert.ok(session, '各工程が新しいコンテキストで開始される');
+    assert.ok(session, 'セッションIDが記録される');
+    const metric = state.metrics?.find(entry => entry.attempt === attempt);
+    if (metric?.resumed) {
+      const previous = sessions.indexOf(session);
+      assert.ok(previous >= 0, '回答後は保存されたセッションを再開する');
+      assert.equal(state.metrics[previous].stage, metric.stage, '別工程のセッションは使わない');
+    } else assert.ok(!sessions.includes(session), '新規試行は別コンテキスト');
     sessions.push(session);
   }
-  assert.equal(new Set(sessions).size, state.attempts);
-  const report = { passed: true, id: state.id, question, attempts: state.attempts, independentContexts: sessions.length, target, dashboard: join(base, 'dashboard.md'), testResult, check };
+  const report = { passed: true, id: state.id, question, attempts: state.attempts, independentContexts: new Set(sessions).size, target, dashboard: join(base, 'dashboard.md'), testResult, check };
   writeFileSync(join(dir, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } finally {
