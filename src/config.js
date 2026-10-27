@@ -25,6 +25,19 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
       if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error('利用枠の固定値が不正です');
     }
   }
+  if (config.dashboardArtifact !== undefined) {
+    const value = config.dashboardArtifact;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('dashboardArtifactの指定が不正です');
+    if (value.url !== undefined && (typeof value.url !== 'string' || !/^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9-]+$/.test(value.url))) {
+      throw new Error('dashboardArtifactのURLが不正です');
+    }
+    const model = value.model ?? 'claude-haiku-5-5';
+    if (validateModel({ model }).cli !== 'claude') throw new Error('dashboardArtifactにはClaudeモデルが必要です');
+    for (const key of ['intervalSeconds', 'timeoutSeconds']) {
+      if (value[key] !== undefined && (!Number.isSafeInteger(value[key]) || value[key] <= 0)) throw new Error(`dashboardArtifactの${key}が不正です`);
+    }
+    config.dashboardArtifact = { ...value, model, intervalSeconds: value.intervalSeconds ?? 300, timeoutSeconds: value.timeoutSeconds ?? 120 };
+  }
   return config;
 }
 

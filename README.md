@@ -55,6 +55,29 @@ Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions
 
 差し戻し時はrequestなら`plan`、changeなら`prereview`で未完了分を再定義する。旧`granularity/architecture`で停止した案件も、次の実行前確認が通った後に`plan`へ戻し、移行をイベントに残す。完了タスク・回答・証拠・試行番号・手戻り回数を保持し、完了済み案件の保存状態やログは変更しない。
 
+## Androidからダッシュボードを読む
+
+`data/dashboard.json`は表示用の要約、`data/dashboard.md`はローカルの詳細一覧。要約はローカルパス・ログ参照・外部証拠本文を除き、工程報告を切り詰める。非共有のClaude Artifactへ要約を埋め込んだHTMLを再公開すると、Androidアプリでも開いたまま更新を読める。閲覧専用で、回答・再開はチャットから行う。
+
+1. claude.aiにログイン済みのClaude Code CLIを用意する。APIキー認証ではArtifactを公開できない。
+2. `CLAUDE_CODE_ARTIFACT=1`を指定し、Claudeに`docs/dashboard-artifact.html`を編集せず、capabilitiesなしのplain pageとして非共有で公開するよう依頼する。`-p`を使う場合は`--tools Artifact,Read --allowedTools Artifact,Read --permission-mode dontAsk`を指定する。共有メニューは変更しない。
+3. 発行されたURLを`workflow.config.json`のトップレベルへ追加する。他の設定は保持する。
+
+```json
+"dashboardArtifact": {
+  "url": "https://claude.ai/artifact/発行されたID",
+  "model": "claude-haiku-5-5",
+  "intervalSeconds": 300,
+  "timeoutSeconds": 120
+}
+```
+
+URL以外は省略でき、上記が既定値。URL未設定ではClaudeを起動しない。URLは`https://claude.ai/artifact/<ID>`または`https://claude.ai/code/artifact/<ID>`、間隔と打ち切りは正の整数秒とする。公開先を開くには所有者のアカウントでログインする。
+
+要約が変わった時だけ公開し、状態・工程・案件数の変化は即時、それ以外は前回の起動から間隔経過後の保存時に公開する。状態保存は公開の終了を待たない。公開中の更新も終了後に拾い、失敗はワークフローへ伝えない。`data/dashboard-publish.json`とMarkdown末尾に最終成功・新しい失敗を記録する。通信・利用枠・CLIの機能変更で公開できない場合は、認証とネットワークを確認し、次の保存または`status`で再試行する。
+
+**要約はclaude.ai上に保存される。** 案件名・質問・報告等の表示文が外部保存に適することを確認し、Artifactは非共有のまま運用する。公開用一時HTMLは`agent-docs/`に作成して終了時に削除する。公開を停止するには`dashboardArtifact`を削除し、既に起動した公開処理の終了を待つ。保存済みのArtifact自体は残る。
+
 ## 検証
 
 `npm test`で、状態遷移、差し戻し、質問・回答、失敗、保存、排他制御を確認する。テストの一時データは`agent-docs/`に作成する。実際のCodex実行にはログイン・通信・利用枠が必要であり、単体テストでは代替の実行関数を用いる。

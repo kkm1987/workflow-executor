@@ -1,0 +1,62 @@
+<title>ワークフローの状況</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #20332e; background: #f2f5f2; font: 16px/1.65 system-ui, sans-serif; overflow-wrap: anywhere; }
+  main { max-width: 880px; margin: auto; padding: 24px max(18px, env(safe-area-inset-right, 0px)) 48px max(18px, env(safe-area-inset-left, 0px)); }
+  h1 { font-size: 1.6rem; margin: 0 0 8px; } h2 { font-size: 1.1rem; margin: 28px 0 12px; }
+  .muted { color: #52665f; font-size: .85rem; } .card { background: white; border: 1px solid #ccd7d0; border-radius: 12px; padding: 16px; margin: 12px 0; }
+  .attention { border-left: 4px solid #986213; } .badge { color: #285849; font-weight: 650; font-size: .85rem; }
+  h3 { font-size: 1.1rem; margin: 6px 0; } p { margin: 8px 0; white-space: pre-wrap; }
+  summary { cursor: pointer; padding: 8px 0; } dl { margin: 8px 0; } dt { font-weight: 650; margin-top: 12px; } dd { margin: 4px 0 0; white-space: pre-wrap; }
+  .id { font: .75rem/1.5 monospace; color: #52665f; }
+</style>
+<main>
+  <h1>ワークフローの状況</h1>
+  <div class="muted" id="updated">更新時刻: なし</div>
+  <p class="muted">閲覧専用です。回答・再開は開発主体とのチャットで行ってください。</p>
+  <p id="message" role="status">要約はまだ公開されていません。</p>
+  <div id="groups"></div>
+</main>
+<script id="dashboard-data" type="application/json">{"generatedAt":null,"counts":{},"groups":[]}</script>
+<script>
+  (() => {
+    const element = (tag, text, className) => {
+      const node = document.createElement(tag);
+      node.textContent = text ?? '';
+      if (className) node.className = className;
+      return node;
+    };
+    const time = value => value ? new Date(value).toLocaleString('ja-JP') : 'なし';
+    try {
+      const data = JSON.parse(document.getElementById('dashboard-data').textContent);
+      if (!Array.isArray(data.groups) || !data.counts) throw new Error('要約形式が不正です');
+      document.getElementById('updated').textContent = `更新時刻: ${time(data.generatedAt)}`;
+      document.getElementById('message').textContent = data.generatedAt
+        ? (data.groups.length ? `全${Object.values(data.counts).reduce((sum, n) => sum + n, 0)}件` : '案件はありません。')
+        : '要約はまだ公開されていません。';
+      for (const group of data.groups) {
+        const section = element('section');
+        section.append(element('h2', `${group.label} · ${group.cases.length}`));
+        for (const item of group.cases) {
+          const card = element('article', '', ['waiting', 'limited', 'failed', 'blocked'].includes(item.status) ? 'card attention' : 'card');
+          card.append(element('div', `${item.statusLabel} / ${item.stageLabel} / ${item.completed}/${item.total} 完了`, 'badge'),
+            element('h3', item.name), element('p', `${item.owner}: ${item.nextAction}`),
+            element('p', item.question || item.reason || item.result || ''),
+            element('p', item.activity), element('div', `活動: ${time(item.activityAt)}`, 'muted'));
+          const details = element('details');
+          details.append(element('summary', '案件の詳細'));
+          const list = element('dl');
+          const fields = { 質問: item.question, 停止理由: item.reason, 結果: item.result,
+            対象: item.report?.scope, 判断と理由: item.report?.decisions, 検証: item.report?.verification, 残件: item.report?.remaining };
+          for (const [label, value] of Object.entries(fields)) if (value) list.append(element('dt', label), element('dd', value));
+          details.append(list, element('div', `ID: ${item.id}`, 'id'), element('div', `最終更新: ${time(item.updatedAt)}`, 'muted'));
+          card.append(details); section.append(card);
+        }
+        document.getElementById('groups').append(section);
+      }
+    } catch {
+      document.getElementById('message').textContent = '要約を取得できません。開発主体に公開状況を確認してください。';
+    }
+  })();
+</script>

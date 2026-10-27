@@ -3,8 +3,10 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, rea
 import { resolve, join, dirname, relative, parse, sep, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { validateModel, stagesFor } from './config.js';
+import { validateModel, stagesFor, readConfig } from './config.js';
 import { readEvidence, currentEvidence, evidenceInput } from './external-evidence.js';
+import { artifactCase } from './dashboard-artifact.js';
+import { publishStatus, requestPublish } from './publish.js';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const dataRoot = join(root, 'data');
@@ -183,23 +185,27 @@ export function attemptHistory(state, base = dataRoot) {
   });
 }
 
-export function dashboard(base = dataRoot) {
+export function dashboard(base = dataRoot, { config, launch, at } = {}) {
   mkdirSync(base, { recursive: true });
   const states = list(base);
   const cell = value => String(value ?? '').replace(/[\r\n]/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/([\\|`*_[\]])/g, '\\$1');
   const url = path => encodeURI(path.replace(/\\/g, '/')).replace(/[()#]/g, char => `%${char.charCodeAt(0).toString(16)}`);
   const lines = ['# Workflow Executor', '', `更新: ${now()}`, '', '成果・検証結果はチャットでも確認できます。完了はクライアントの承認を意味しません。'];
   const groups = [['回答待ち', ['waiting']], ['利用枠不足', ['limited']], ['開発主体の復旧・再計画待ち', ['failed', 'blocked']], ['成果確認可能', ['completed']], ['進行中', ['ready', 'running']]];
+  const views = new Map(states.map(state => [state.id, summary(state, base)]));
+  const snapshot = { generatedAt: states.map(state => state.updatedAt).sort().at(-1) ?? null, counts: {}, groups: [] };
   for (const [label, statuses] of groups) {
     const selected = states.filter(state => statuses.includes(state.status));
     if (!selected.length) continue;
+    snapshot.groups.push({ label, cases: selected.map(state => artifactCase(views.get(state.id), state)) });
+    for (const state of selected) snapshot.counts[state.status] = (snapshot.counts[state.status] ?? 0) + 1;
     lines.push('', `## ${label}`, '', '| 案件 | 状態 | 工程 | 完了 | 対応者 | 必要な対応 | 最終更新 | 最新活動 | 活動時刻 |', '| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const state of selected) {
-      const view = summary(state, base);
+      const view = views.get(state.id);
       lines.push(`| [${cell(view.name)}](${state.id}/state.json) | ${view.statusLabel} | ${view.stageLabel} | ${view.completed}/${view.total} | ${view.owner} | ${cell(view.nextAction)} | ${cell(view.updatedAt)} | ${cell(activityText(view).slice(0, 120))} | ${cell(view.activity?.at ?? '未記録')} |`);
     }
     for (const state of selected) {
-      const view = summary(state, base);
+      const view = views.get(state.id);
       lines.push('', '<details>', `<summary>${cell(view.name)}の詳細</summary>`, '', `ID: ${cell(state.id)}`, '', `開発対象: ${cell(state.target)}`);
       lines.push('', `現在の試行: ${cell(view.work ? JSON.stringify(view.work) : '未記録')}`,
         '', `${cell(activityText(view))} / 活動時刻: ${cell(view.activity?.at ?? '未記録')}`);
@@ -220,6 +226,15 @@ export function dashboard(base = dataRoot) {
       lines.push('', '</details>');
     }
   }
+  // 公開の設定・記録・起動の失敗は、状態保存の成否に影響させない。
+  try {
+    const path = join(base, 'dashboard.json');
+    const temporary = `${path}.${randomUUID()}.new`;
+    try { writeFileSync(temporary, JSON.stringify(snapshot)); renameSync(temporary, path); }
+    finally { if (existsSync(temporary)) unlinkSync(temporary); }
+    const publishing = (config ?? readConfig()).dashboardArtifact;
+    if (publishing?.url) { requestPublish(snapshot, base, publishing, launch, at); lines.push('', publishStatus(base)); }
+  } catch {}
   writeFileSync(join(base, 'dashboard.md.new'), `${lines.join('\n')}\n`);
   renameSync(join(base, 'dashboard.md.new'), join(base, 'dashboard.md'));
 }
