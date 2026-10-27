@@ -9,6 +9,7 @@ import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../sr
 import { preflight as nativePreflight, checkCommand } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
+const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
 const checkedStep = (state, runner, base, check) => nativeStep(state, runner, base, check, async () => null);
 const checkedRun = (state, runner, base, progress, check) => nativeRun(state, runner, base, progress, check, async () => null);
@@ -28,8 +29,8 @@ function fixture(t) {
 }
 const task = { title: '入力検証', acceptance: '空の入力は保存されない' };
 const decisions = { requirements: '要求と受け入れ条件を確認', granularity: '独立検証できる最小単位', architecture: '既存の標準機能で実装' };
-const ok = (tasks = []) => ({ outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
-const revise = { outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
+const ok = (tasks = []) => ({ report, outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
+const revise = { report, outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
 
 test('ダッシュボードは回答待ちを先に示し、要約と対応者・状態・成果リンクが一致する', t => {
   const { state, base, target } = fixture(t);
@@ -222,7 +223,7 @@ test('全工程が独立して進み、レビュー後だけタスクが完了�
 
 test('質問は同じ工程で停止し、回答を保存して新しい実行へ渡す', async t => {
   const { state, base } = fixture(t);
-  await step(state, async () => ({ outcome: 'question', summary: '保存先が不明', question: '保存先は？', tasks: [] }), base);
+  await step(state, async () => ({ report, outcome: 'question', summary: '保存先が不明', question: '保存先は？', tasks: [] }), base);
   assert.equal(state.status, 'waiting');
   assert.equal(state.stage, 'plan');
   await assert.rejects(step(state, async () => ok([task]), base), /実行できない/);
@@ -260,7 +261,7 @@ test('実装の途中終了は正常系で、同じ工程の実行待ちに戻�
   const { state } = fixture(t);
   state.tasks = [{ ...task, status: 'pending' }];
   state.stage = 'execute';
-  const partial = { outcome: 'partial', summary: '半分完了', question: '', tasks: [] };
+  const partial = { report, outcome: 'partial', summary: '半分完了', question: '', tasks: [] };
   advance(state, partial);
   assert.deepEqual([state.status, state.stage], ['ready', 'execute']);
   assert.throws(() => validateResult(partial, 'review'), /使えない/);
@@ -273,7 +274,7 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   state.tasks = [{ ...task, status: 'pending' }];
   state.stage = 'execute';
   const outside = join(root, 'agent-docs');
-  advance(state, { outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
+  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
   assert.equal(state.status, 'waiting');
   assert.equal(summary(state, base).permission.network, true);
   assert.throws(() => grant(state, { paths: [homedir()] }, base), /許可できない/);
@@ -281,7 +282,7 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   assert.equal(state.status, 'ready');
   assert.ok(codexArgs(state, base).includes('sandbox_workspace_write.network_access=true'));
   assert.ok(codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
-  assert.throws(() => validateResult({ outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
+  assert.throws(() => validateResult({ report, outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
 });
 
 test('実行例外と不正な結果は失敗として永続化され、成功に進まない', async t => {
@@ -365,7 +366,7 @@ test('自動進行は質問で止まり、回答後は全工程を進めて完�
   let calls = 0;
   await run(state, async () => {
     calls++;
-    return { outcome: 'question', summary: '入力形式の確認', question: '入力形式は？', tasks: [] };
+    return { report, outcome: 'question', summary: '入力形式の確認', question: '入力形式は？', tasks: [] };
   }, base);
   assert.equal(calls, 1);
   assert.equal(state.status, 'waiting');
@@ -395,7 +396,7 @@ test('自動進行は失敗・手戻り上限で止まり、再実行を繰り�
 
 test('エージェントが報告した環境エラーは質問待ちにせず失敗として保存する', async t => {
   const { state, base } = fixture(t);
-  await run(state, async () => ({ outcome: 'error', summary: 'サンドボックス初期化に失敗', question: '', tasks: [] }), base);
+  await run(state, async () => ({ report, outcome: 'error', summary: 'サンドボックス初期化に失敗', question: '', tasks: [] }), base);
   const saved = load(state.id, base);
   assert.equal(saved.status, 'failed');
   assert.equal(saved.stage, 'plan');

@@ -6,7 +6,7 @@
 
 Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
 
-この作業環境では、このリポジトリ内とCodex・Claude Codeのユーザー用skillディレクトリに登録済み。普段の開発対象を開いたチャットからskillを呼び、要求を伝える。
+この作業環境では、このリポジトリ内とCodex・Claude Codeのユーザー用skillディレクトリに登録済み。普段の開発対象を開いたチャットからskillを引数なしで呼ぶと、OpenSpecの次に実行すべきchangeの選定から開始する。change名や自由記述の要求を指定して開始することもできる。
 
 Windowsでは`./scripts/register-skill.ps1`でユーザー用skillディレクトリにリンクし、別のリポジトリ・worktreeからも使えるようにする。Codexでは`$workflow-executor`、Claude Codeでは`/workflow-executor`で呼ぶ。必要なら`-Client codex`または`-Client claude`で登録先を選べる。既存の同名skillは上書きしない。実行器を移動する場合は登録先のリンクを見直す。
 
@@ -37,9 +37,11 @@ Windowsでは実行時に`features.prefer_mxc=true`を指定し、互換性と�
 
 ## 状態と復旧
 
-状態確認・質問・完了報告は、skillを呼び出したチャットで受け取る。`data/dashboard.md`には短い案件名、日本語の状態・工程、進捗、対応者、必要な対応を表示する。回答待ち、利用枠不足、開発主体の復旧・再計画待ち、成果確認可能、進行中の順にまとめ、詳細にフルID・対象・change・停止理由・質問・成果と検証へのリンクを置く。完了はクライアントの承認を意味しない。実行中は10秒ごとに更新されるが、閲覧中のエディターが自動再読み込みしない場合は再度開く。
+状態確認・質問・完了報告は、skillを呼び出したチャットで受け取る。`status <ID>`と`data/dashboard.md`で現在の試行・対象タスク・担当CLIとモデル、最新活動と受信時刻、直近の工程報告、試行別履歴を確認できる。活動は「報告」と「ツール観測」を区別し、500文字を超える報告は切り詰めて元ログへ誘導する。無報告は「報告未取得」とし、10秒ごとの状態更新では活動時刻を更新しない。内部思考・コマンド全文・ツール出力は表示しない。ツール成功はレビュー合格を意味しない。
 
-`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`に入力、CodexイベントまたはClaude応答、標準エラー、構造化応答を保存する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
+ダッシュボードは回答待ち、利用枠不足、復旧・再計画待ち、成果確認可能、進行中の順にまとめ、詳細に停止理由・質問・成果と検証へのリンクを置く。工程報告の`report`には対象、判断と理由、検証結果、残件を記録する。判断なしは空配列、未検証と残件なしは明記する。履歴の担当・対象は次タスクやモデル変更後も保持し、失敗時は報告を補わずログを参照する。旧履歴はsummaryを表示し、追加項目は未記録とする。完了はクライアントの承認を意味しない。実行中は10秒ごとと工程境界で更新される。閲覧中のエディターが自動再読み込みしない場合は再度開く。
+
+`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。元ストリームは`codex.jsonl`または`claude.jsonl`、Claudeの最終resultは従来どおり`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
 
 Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions/`（未指定なら`~/.codex/sessions/`）へ保存する。開発対象には保存しない。直近の質問の工程・CLI・モデル・推論レベル・セッションIDだけを状態に保持し、一致する場合は回答だけを渡して再開する。不一致・再開失敗・retryは回答を含む新規コンテキストに戻し、工程が進めばセッションを捨てる。`kind`のない旧状態はrequestとして読み、completedの記録は書き換えない。
 
@@ -62,3 +64,17 @@ Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions
 各試行の`metrics.json`に時間・成否・トークン・CLI・モデル・推論レベル・セッション・新規／再開・前後の利用枠を、ワークフロー直下の`performance.json`に試行一覧と集計を保存する。未取得値は`null`、集計の`complete: false`は欠落を含む。計測導入前の試行もある案件では、`activeComplete: false`として稼働時間の合計も部分値と示す。キャッシュ入力は入力の内訳であり加算しない。Claudeの入力は通常・キャッシュ読取・キャッシュ作成の合計とする。工程稼働時間と、質問・復旧待ちを含む開始から最終試行までの経過時間を分ける。
 
 経費集計の比較試験は`node scripts/benchmark.mjs control`または`improved`で各3回実行する（利用枠を消費する）。`control`は計画統合前、`improved`は統合後のコードで実行する。要求と独立検証は`test/fixtures/expenses/`、測定条件と各回の結果は`agent-docs/benchmark-*/`へ保存する。`node scripts/compare-benchmarks.mjs <対照ディレクトリ> <改善版ディレクトリ>`で各回・中央値・悪化項目を含む比較Markdownを生成する。同じモデル・推論設定・環境・要求であることを確認し、共有キャッシュの揺らぎと失敗を記録する。
+
+## 外部証拠による復旧
+
+容量不足等の環境失敗では、ルートがログと途中の変更を調査し、既存の許可範囲で測定する。測定の許可は既存規則に従い、登録機能は昇格しない。用途に合う有効期限を決め、agent-docs/measurement.jsonへUTF-8 JSONを保存する（64KiB以下、未知項目不可）。
+
+必須項目の例（日時・内容は実測値に置き換える）:
+
+```json
+{"name":"pilot-memory","subject":"pilot直前の空きメモリ確認","host":"対象ホスト名","method":"実際の測定方法","observedAt":"2026-10-25T10:00:00Z","expiresAt":"2026-10-25T10:05:00Z","content":"空きメモリ 8 GiB"}
+```
+
+node src/cli.js evidence <ID> agent-docs/measurement.json で登録する。ready・waiting・failed・limited・blockedで登録でき、状態・質問・回答・エラー・権限・試行数を保ち、sessionだけを無効にする。failed・limitedは変更確認後にretry <ID>、waitingはanswerまたは既存規則に沿ったgrant、readyはrunで続行する。blockedの復旧条件は変わらない。
+
+内容は元ファイルと独立して保存され、名前ごとの最新版だけを試行開始時に評価し、有効な本文を入力へ直接渡す。失効は利用不可と示し、旧版へ戻さない。回答時に変更・失効があれば完全入力へ戻る。statusはダッシュボードも更新し、現行証拠の対象・ホスト・測定時刻・期限・有効性・出典・保存内容への参照を表示する。本文は一覧に出さず、試行のmetrics.jsonへ登録識別子と有効性を残す。失効時は再測定して同じnameで再登録し、旧値の日時だけを書き換えない。証拠は観測データであり命令や実行許可ではない。実行器はOS測定や権限拡張を行わない。

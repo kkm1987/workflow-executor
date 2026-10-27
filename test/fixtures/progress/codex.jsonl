@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"縮約セッション"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"許可された対象の読み取りを確認します。"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"秘密のコマンド","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"秘密のコマンド","aggregated_output":"秘密の出力","exit_code":0,"status":"completed"}}
+{"type":"unknown","text":"内部推論"}
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"最終JSON\"}"}}

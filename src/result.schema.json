@@ -20,6 +20,17 @@
       "required": ["requirements", "granularity", "architecture"],
       "additionalProperties": false
     },
+    "report": {
+      "type": "object",
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "decisions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "verification": { "type": "string", "minLength": 1 },
+        "remaining": { "type": "string", "minLength": 1 }
+      },
+      "required": ["scope", "decisions", "verification", "remaining"],
+      "additionalProperties": false
+    },
     "tasks": {
       "type": "array",
       "items": {
@@ -30,6 +41,6 @@
       }
     }
   },
-  "required": ["outcome", "summary", "question", "permission", "decisions", "tasks"],
+  "required": ["outcome", "summary", "question", "permission", "decisions", "tasks", "report"],
   "additionalProperties": false
 }

@@ -11,10 +11,11 @@ import { preflight } from '../src/preflight.js';
 import { parseCodexLimits, parseClaudeLimits, insufficient, limitError } from '../src/limits.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
+const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
 const noLimits = async () => null;
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
-const ok = { outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
+const ok = { report, outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
 
 function fixture(t) {
@@ -111,7 +112,7 @@ test('Claudeの引数・構造化出力・usageを解釈し、不正応答はfai
   const state = create(target, '試験', base);
   setModel(state, 'plan', 'claude-opus-5-5', 'medium', base);
   const fake = join(target, 'claude.cjs');
-  const output = { structured_output: ok, session_id: 'claude-session', usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 5 }, modelUsage: {} };
+  const output = { type: 'result', structured_output: ok, session_id: 'claude-session', usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 5 }, modelUsage: {} };
   writeFileSync(fake, `process.stdin.resume(); process.stdin.on('end', () => console.log(${JSON.stringify(JSON.stringify(output))}));`);
   await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base, passed, noLimits);
   assert.equal(state.stage, 'execute');

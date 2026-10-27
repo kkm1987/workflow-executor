@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { openSync, closeSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { root, dataRoot, directory, save, event, advance, prompt } from './workflow.js';
@@ -10,17 +10,20 @@ import { assignment, readConfig } from './config.js';
 import { resolveCodex, spawnCommand } from './commands.js';
 import { validatePrereview } from './changes.js';
 import { rateLimits, insufficient, limitError } from './limits.js';
+import { evidenceSelection } from './external-evidence.js';
+import { activity, eventStream } from './activity.js';
 
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
 
 export function resumeSession(state) {
   const value = assignment(state);
   const session = state.session;
-  return session?.sessionId && session.stage === state.stage &&
+  const selected = evidenceSelection(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
+  return session?.sessionId && JSON.stringify(session.externalEvidence ?? []) === JSON.stringify(selected) && session.stage === state.stage &&
     ['cli', 'model', 'effort'].every(key => session[key] === value[key]) ? session : null;
 }
 
-export const inputFor = state => resumeSession(state) ? state.answers.at(-1).answer : prompt(state);
+export const inputFor = state => resumeSession(state) ? state.answers.at(-1).answer : prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
 
 export function codexArgs(state, dir) {
   const value = assignment(state);
@@ -58,7 +61,7 @@ export function claudeArgs(state, sessionId) {
     '--tools', `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
     ...(granted?.paths?.length ? ['--add-dir', ...granted.paths] : []),
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
-    '--output-format', 'json', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
+    '--output-format', 'stream-json', '--verbose', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
     ...(session ? ['--resume', session.sessionId] : ['--session-id', sessionId]),
     '--permission-mode', 'dontAsk', '--allowedTools', ...tools];
 }
@@ -72,13 +75,23 @@ async function invokeAgent(state, dir, command, prefix = []) {
   let stdout;
   let stderr;
   let failure;
+  let finalOutput;
+  const tools = new Map();
+  const metadata = { ...value, sessionId, resumed: Boolean(resumeSession(state)), work: state.work ?? null };
+  const receive = eventStream(entry => {
+    const latest = activity(entry, value.cli, new Date().toISOString(), tools);
+    if (latest) state.activity = latest;
+    if (entry.type === 'thread.started') metadata.sessionId = entry.thread_id;
+    if (entry.type === 'turn.failed' || entry.type === 'error') failure ??= new Error(JSON.stringify(entry));
+    if (value.cli === 'claude' && entry.type === 'result') finalOutput = entry;
+  });
   try {
-    stdout = openSync(join(dir, value.cli === 'codex' ? 'codex.jsonl' : 'claude.json'), 'w');
+    stdout = openSync(join(dir, value.cli === 'codex' ? 'codex.jsonl' : 'claude.jsonl'), 'w');
     stderr = openSync(join(dir, 'stderr.log'), 'w');
     await new Promise((resolve, reject) => {
       const args = value.cli === 'codex' ? codexArgs(state, dir) : claudeArgs(state, sessionId);
       const child = spawnCommand(command, [...prefix, ...args], {
-        cwd: state.target, stdio: ['pipe', stdout, stderr], windowsHide: true,
+        cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true,
       });
       let interrupted = false;
       const stop = () => {
@@ -88,10 +101,20 @@ async function invokeAgent(state, dir, command, prefix = []) {
           // Stop the process tree so a tool cannot keep editing after interruption.
           const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
           killer.on('error', () => child.kill());
+          killer.once('exit', code => { if (code !== 0) child.kill(); });
         } else child.kill('SIGTERM');
       };
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);
+      child.stdout.on('data', chunk => {
+        try {
+          // 同期保存で次のチャンクを待たせ、未保存データを蓄積しない。
+          let offset = 0;
+          while (offset < chunk.length) offset += writeSync(stdout, chunk, offset);
+          receive(chunk);
+        } catch (error) { failure ??= error; stop(); }
+      });
+      child.stdout.on('error', error => { failure ??= error; stop(); });
       child.once('error', reject);
       child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
       child.once('close', code => {
@@ -104,16 +127,18 @@ async function invokeAgent(state, dir, command, prefix = []) {
       child.stdin.end(input);
     });
   } catch (error) {
-    failure = error;
+    failure ??= error;
   } finally {
-    if (stdout !== undefined) closeSync(stdout);
-    if (stderr !== undefined) closeSync(stderr);
+    for (const handle of [stdout, stderr]) {
+      if (handle !== undefined) { try { closeSync(handle); } catch (error) { failure ??= error; } }
+    }
   }
-  const metadata = { ...value, sessionId, resumed: Boolean(resumeSession(state)) };
   let result;
   try {
     if (value.cli === 'claude') {
-      const output = JSON.parse(readFileSync(join(dir, 'claude.json'), 'utf8'));
+      const output = finalOutput;
+      if (!output) throw new Error('Claudeの最終構造化出力がありません');
+      writeFileSync(join(dir, 'claude.json'), JSON.stringify(output, null, 2));
       metadata.sessionId = output.session_id ?? sessionId;
       metadata.modelUsage = output.modelUsage ?? null;
       if (output.is_error || output.subtype?.startsWith('error')) throw new Error(JSON.stringify(output));
@@ -121,18 +146,12 @@ async function invokeAgent(state, dir, command, prefix = []) {
       if (!result || typeof result !== 'object') throw new Error('Claudeの構造化出力がありません');
       writeFileSync(join(dir, 'response.json'), JSON.stringify(result, null, 2));
     } else {
-      for (const line of readFileSync(join(dir, 'codex.jsonl'), 'utf8').split('\n')) {
-        let entry;
-        try { entry = JSON.parse(line); } catch { continue; }
-        if (entry.type === 'thread.started') metadata.sessionId = entry.thread_id;
-        if (entry.type === 'turn.failed' || entry.type === 'error') failure ??= new Error(JSON.stringify(entry));
-      }
       result = JSON.parse(readFileSync(join(dir, 'response.json'), 'utf8'));
     }
   } catch (error) { failure ??= error; }
-  writeFileSync(join(dir, 'invocation.json'), JSON.stringify(metadata, null, 2));
+  writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...metadata, activity: state.activity ?? null }, null, 2));
   if (failure) {
-    const logs = [value.cli === 'claude' ? 'claude.json' : 'codex.jsonl', 'stderr.log'].map(file => {
+    const logs = [value.cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl', 'stderr.log'].map(file => {
       try { return readFileSync(join(dir, file), 'utf8'); } catch { return ''; }
     }).join('\n');
     if (limitError(logs)) failure.limited = true;
@@ -146,7 +165,7 @@ export async function runAgent(state, dir, command, prefix = []) {
   let before;
   if (['execute', 'prereview'].includes(state.stage)) {
     evidence = { attempt: state.attempts, before: join(dir, 'before.json'), after: join(dir, 'after.json'),
-      log: join(dir, assignment(state).cli === 'claude' ? 'claude.json' : 'codex.jsonl') };
+      log: join(dir, assignment(state).cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl') };
     before = await snapshot(state.target, evidence.before);
     state.evidence ??= [];
     state.evidence.push(evidence);
@@ -208,16 +227,24 @@ async function executeStep(state, runner, base, limits, validate) {
     save(state, base);
     return state;
   }
+  state.inputAt = new Date().toISOString();
   if (!resumeSession(state)) delete state.session;
   const resumed = Boolean(resumeSession(state));
   const metric = { attempt: state.attempts + 1, stage: state.stage, ...value, resumed,
-    sessionId: state.session?.sessionId ?? null, beforeLimits, startedAt: new Date().toISOString() };
+    sessionId: state.session?.sessionId ?? null, beforeLimits, startedAt: state.inputAt,
+    externalEvidence: evidenceSelection(state, Date.parse(state.inputAt)) };
   const started = performance.now();
   state.attempts += 1;
   const dir = join(directory(state.id, base), `attempt-${String(state.attempts).padStart(4, '0')}`);
   mkdirSync(dir);
-  writeFileSync(join(dir, 'prompt.txt'), inputFor(state));
   state.status = 'running';
+  state.work = { attempt: state.attempts, stage: state.stage, ...value,
+    scope: (['execute', 'review'].includes(state.stage) ? state.tasks.find(task => task.status !== 'completed')?.title : state.change)
+      ?? state.requirement.split(/\r?\n/).find(line => line.trim())?.slice(0, 500) ?? '対象未記録',
+    startedAt: state.inputAt };
+  state.activity = null;
+  writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...value, work: state.work, activity: null }, null, 2));
+  writeFileSync(join(dir, 'prompt.txt'), inputFor(state));
   save(state, base);
   event(state, 'started', { stage: state.stage, attempt: state.attempts }, base);
   let heartbeatError;
@@ -243,7 +270,7 @@ async function executeStep(state, runner, base, limits, validate) {
     }
     advance(state, result);
     if (state.status !== 'waiting') delete state.session;
-    if (state.status === 'waiting' && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId };
+    if (state.status === 'waiting' && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
     event(state, state.status === 'completed' ? 'completed' : state.status === 'failed' ? 'failed' : 'finished', result, base);
   } catch (error) {
@@ -254,6 +281,9 @@ async function executeStep(state, runner, base, limits, validate) {
     event(state, state.status, error.message, base);
   } finally {
     clearInterval(heartbeat);
+    const invocationPath = join(dir, 'invocation.json');
+    const invocation = JSON.parse(readFileSync(invocationPath, 'utf8'));
+    writeFileSync(invocationPath, JSON.stringify({ ...invocation, activity: state.activity }, null, 2));
     metric.finishedAt = new Date().toISOString();
     metric.durationMs = performance.now() - started;
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
