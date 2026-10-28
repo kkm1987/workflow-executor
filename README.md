@@ -6,6 +6,29 @@
 
 Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
 
+### クローン後のセットアップ
+
+```powershell
+git clone <リポジトリURL>
+cd workflow-executor
+npm ci
+```
+
+Node.js 22以上を用意し、Codex CLIへログインする。Claudeを割り当てる場合はClaude Code CLIにもログインする。Windowsで別のリポジトリやworktreeから使う場合は、ユーザー用skillを登録する。
+
+```powershell
+.\scripts\register-skill.ps1
+```
+
+登録後はCodexで`$workflow-executor`、Claude Codeで`/workflow-executor`を呼び出す。skillを使わずCLIから開始する場合は、実行器のルートで次のように実行する（`<対象リポジトリ>`は開発対象の絶対パス）。
+
+```powershell
+node src/cli.js start <対象リポジトリ> agent-docs\request.md
+node src/cli.js run <ID>
+```
+
+OpenSpec changeを指定して開始する場合は`start-change <対象リポジトリ> [change名]`を使う。以降のCLI操作例は下記を参照。
+
 この作業環境では、このリポジトリ内とCodex・Claude Codeのユーザー用skillディレクトリに登録済み。普段の開発対象を開いたチャットからskillを引数なしで呼ぶと、OpenSpecの次に実行すべきchangeの選定から開始する。change名や自由記述の要求を指定して開始することもできる。
 
 Windowsでは`./scripts/register-skill.ps1`でユーザー用skillディレクトリにリンクし、別のリポジトリ・worktreeからも使えるようにする。Codexでは`$workflow-executor`、Claude Codeでは`/workflow-executor`で呼ぶ。必要なら`-Client codex`または`-Client claude`で登録先を選べる。既存の同名skillは上書きしない。実行器を移動する場合は登録先のリンクを見直す。
