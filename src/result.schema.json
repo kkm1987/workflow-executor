@@ -1,7 +1,7 @@
 {
   "type": "object",
   "properties": {
-    "outcome": { "type": "string", "enum": ["ok", "question", "revise", "error", "partial", "permission"] },
+    "outcome": { "type": "string", "enum": ["ok", "question", "revise", "error", "partial", "permission", "approval"] },
     "summary": { "type": "string" },
     "question": { "type": "string" },
     "permission": {

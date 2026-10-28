@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { root, create, load, save, answer, grant, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
+import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
 import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../src/executor.js';
 import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
@@ -31,6 +31,160 @@ const task = { title: '入力検証', acceptance: '空の入力は保存され�
 const decisions = { requirements: '要求と受け入れ条件を確認', granularity: '独立検証できる最小単位', architecture: '既存の標準機能で実装' };
 const ok = (tasks = []) => ({ report, outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
 const revise = { report, outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
+
+const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合' }];
+const prereviewResult = (approvals = []) => ({ ...ok([task]), change: 'sample-change', approvals,
+  decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要' } });
+
+test('承認計画の必須項目を検証し、空配列を受理する', () => {
+  const schema = JSON.parse(readFileSync(join(root, 'src/prereview.schema.json'), 'utf8'));
+  assert.ok(schema.required.includes('approvals'));
+  assert.deepEqual(schema.properties.approvals.items.required, ['tasks', 'action', 'limits', 'stopWhen']);
+  assert.doesNotThrow(() => validateResult(prereviewResult(), 'prereview'));
+  for (const approvals of [undefined, null, {}, [null], ...Object.keys(approvalItems[0]).flatMap(key =>
+    ['', ' ', undefined, 1].map(value => [{ ...approvalItems[0], [key]: value }]))]) {
+    assert.throws(() => validateResult({ ...prereviewResult(), approvals }, 'prereview'), /承認計画/);
+  }
+});
+
+test('新しい計画は承認待ち、同じ承認済み計画と空配列は実装へ進む', t => {
+  const { state, base } = fixture(t);
+  Object.assign(state, { kind: 'change', stage: 'prereview' });
+  advance(state, prereviewResult(approvalItems));
+  assert.equal(state.stage, 'execute');
+  assert.equal(state.status, 'waiting');
+  assert.equal(state.tasks[0].status, 'pending');
+  assert.equal(state.approval.status, 'pending');
+  assert.ok(Number.isFinite(Date.parse(state.approval.proposedAt)));
+  assert.match(state.question, /承認計画.*1件/);
+  const view = summary(state, base);
+  assert.deepEqual(view.approval.items, approvalItems);
+  assert.match(view.nextAction, /承認計画.*1件/);
+  save(state, base);
+  const markdown = readFileSync(join(base, 'dashboard.md'), 'utf8');
+  assert.match(markdown, /承認計画.*1件/);
+  for (const value of Object.values(approvalItems[0])) assert.ok(markdown.includes(value));
+  approve(state, '検証終了後にVMを停止する', base);
+  const approval = structuredClone(state.approval);
+  state.stage = 'prereview';
+  advance(state, prereviewResult(structuredClone(approvalItems)));
+  assert.equal(state.status, 'ready');
+  assert.deepEqual(state.approval, approval);
+  state.stage = 'prereview';
+  advance(state, prereviewResult());
+  assert.equal(state.status, 'ready');
+  state.stage = 'prereview';
+  advance(state, prereviewResult([{ ...approvalItems[0], limits: '合計€30以内' }]));
+  assert.equal(state.status, 'waiting');
+  assert.equal(state.approval.status, 'pending');
+});
+
+test('承認は計画・条件・日時とイベントを保存し、承認待ち以外を拒否する', t => {
+  const { state, base } = fixture(t);
+  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+  state.stage = 'prereview';
+  advance(state, prereviewResult(approvalItems));
+  const proposedAt = state.approval.proposedAt;
+  approve(state, '合計€20以内', base);
+  assert.equal(state.status, 'ready');
+  assert.equal(state.stage, 'execute');
+  assert.equal(state.question, '');
+  assert.deepEqual(state.approval.items, approvalItems);
+  assert.equal(state.approval.conditions, '合計€20以内');
+  assert.equal(state.approval.proposedAt, proposedAt);
+  assert.ok(Number.isFinite(Date.parse(state.approval.approvedAt)));
+  assert.deepEqual(load(state.id, base).approval, state.approval);
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).detail, state.approval);
+  assert.equal(events.at(-1).type, 'approved');
+  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+  state.status = 'waiting';
+  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+});
+
+test('承認計画へのanswerは回答を保存して実行前レビューへ差し戻す', t => {
+  const { state, base } = fixture(t);
+  state.stage = 'prereview';
+  advance(state, prereviewResult(approvalItems));
+  const question = state.question;
+  state.session = { sessionId: '古い実装セッション' };
+  answer(state, 'VMは使用しない', base);
+  assert.equal(state.status, 'ready');
+  assert.equal(state.stage, 'prereview');
+  assert.equal(state.approval, undefined);
+  assert.equal(state.session, undefined);
+  assert.deepEqual(state.answers.at(-1), { stage: 'execute', question, answer: 'VMは使用しない' });
+  assert.equal(load(state.id, base).stage, 'prereview');
+});
+
+test('approval結果は実装だけで有効で、完了タスクと承認を保持し上限で停止する', t => {
+  const { state, base } = fixture(t);
+  state.stage = 'prereview';
+  advance(state, prereviewResult(approvalItems));
+  approve(state, '', base);
+  state.tasks.unshift({ ...task, status: 'completed', result: '検証済み' });
+  const tasks = structuredClone(state.tasks);
+  const approval = structuredClone(state.approval);
+  const result = { ...ok(), outcome: 'approval', summary: '費用上限の変更が必要' };
+  const schema = JSON.parse(readFileSync(join(root, 'src/result.schema.json'), 'utf8'));
+  assert.ok(schema.properties.outcome.enum.includes('approval'));
+  for (const stage of ['plan', 'prereview', 'review', 'acceptance']) {
+    assert.throws(() => validateResult(result, stage), /使えない結果/);
+  }
+  for (let count = 1; count <= 4; count++) {
+    state.stage = 'execute';
+    advance(state, result);
+    assert.equal(state.revisions, count);
+    assert.equal(state.stage, 'prereview');
+    assert.equal(state.status, count > 3 ? 'blocked' : 'ready');
+    assert.deepEqual(state.tasks, tasks);
+    assert.deepEqual(state.approval, approval);
+    assert.equal(state.lastResult, result.summary);
+  }
+});
+
+test('retry・partial・revise・証拠登録は承認計画と条件を保持する', t => {
+  const { state, base, target } = fixture(t);
+  state.kind = 'change';
+  state.stage = 'prereview';
+  advance(state, prereviewResult(approvalItems));
+  approve(state, '検証後に停止', base);
+  assert.match(prompt(state), /入力のapprovalで承認済みの項目の範囲を除き/);
+  assert.match(prompt(state), /範囲内の操作は質問せず/);
+  assert.match(prompt(state), /停止条件.*outcome=approval/);
+  assert.match(prompt(state), /report.decisionsに使った承認項目/);
+  const approval = structuredClone(state.approval);
+  state.status = 'failed';
+  retry(state, base);
+  assert.deepEqual(state.approval, approval);
+  advance(state, { ...ok(), outcome: 'partial' });
+  assert.deepEqual(state.approval, approval);
+  state.stage = 'review';
+  advance(state, revise);
+  assert.deepEqual(state.approval, approval);
+  const path = join(target, '測定.json');
+  writeFileSync(path, JSON.stringify({ name: 'memory', subject: '検証用容量', host: 'test-host', method: '試験用測定',
+    observedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), content: '8 GiB' }));
+  registerEvidence(state, path, base);
+  assert.deepEqual(state.approval, approval);
+  assert.deepEqual(load(state.id, base).approval, approval);
+});
+
+test('入力には承認済みの計画と条件だけを渡し、実行前レビューに全体の計画を指示する', t => {
+  const { state, base } = fixture(t);
+  const input = () => JSON.parse(prompt(state).split('\n').at(-1));
+  assert.equal(input().approval, undefined);
+  state.stage = 'prereview';
+  assert.match(prompt(state), /未完了の全タスク/);
+  assert.match(prompt(state), /同じ表現を再利用/);
+  advance(state, prereviewResult(approvalItems));
+  assert.equal(input().approval, undefined);
+  approve(state, '検証後に停止', base);
+  for (const stage of ['execute', 'prereview']) {
+    state.stage = stage;
+    assert.deepEqual(input().approval, { items: approvalItems, conditions: '検証後に停止' });
+  }
+});
 
 test('ダッシュボードは回答待ちを先に示し、要約と対応者・状態・成果リンクが一致する', t => {
   const { state, base, target } = fixture(t);

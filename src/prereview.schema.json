@@ -1,6 +1,20 @@
 {
   "type": "object",
   "properties": {
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "tasks": { "type": "string" },
+          "action": { "type": "string" },
+          "limits": { "type": "string" },
+          "stopWhen": { "type": "string" }
+        },
+        "required": ["tasks", "action", "limits", "stopWhen"],
+        "additionalProperties": false
+      }
+    },
     "outcome": { "type": "string", "enum": ["ok", "question", "error"] },
     "summary": { "type": "string" },
     "question": { "type": "string" },
@@ -36,6 +50,6 @@
       }
     }
   },
-  "required": ["outcome", "summary", "question", "change", "decisions", "tasks", "report"],
+  "required": ["outcome", "summary", "question", "change", "decisions", "tasks", "report", "approvals"],
   "additionalProperties": false
 }

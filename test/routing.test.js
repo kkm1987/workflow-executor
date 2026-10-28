@@ -16,7 +16,7 @@ const passed = async () => ({ ok: true });
 const noLimits = async () => null;
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
-const prereview = { ...ok, change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
+const prereview = { ...ok, approvals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
 
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'routing-'));
