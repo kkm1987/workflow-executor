@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { openSpecRoot, storeArgs, runOpenSpec } from './changes.js';
 import { resolveCodex, resolveExecutable, spawnCommand } from './commands.js';
 import { assignment, stagesFor } from './config.js';
 
@@ -39,12 +41,22 @@ export function checkCommand(command, args, cwd, timeout = 15_000) {
   });
 }
 
-export async function preflight(state, check = checkCommand, locate = resolveCodex, locateClaude = () => resolveExecutable('claude')) {
+export async function preflight(state, check = checkCommand, locate = resolveCodex, locateClaude = () => resolveExecutable('claude'), spec = runOpenSpec) {
   const report = { startedAt: new Date().toISOString(), target: state.target, checks: [], ok: false };
   let name = '開発対象';
   try {
     if (!statSync(state.target).isDirectory()) throw new Error('ディレクトリではありません');
     report.checks.push({ name, ok: true });
+    if (state.kind === 'change') {
+      name = 'OpenSpecルートの解決';
+      const root = openSpecRoot(state).root;
+      const listing = JSON.parse(await spec(root, ['list', '--json', ...storeArgs(state)]));
+      if (!listing.root?.path || resolve(listing.root.path) !== resolve(root)) throw new Error('保存したルートと一致しません');
+      report.checks.push({ name, ok: true });
+      name = 'OpenSpecのGit作業ツリー';
+      await check('git', ['rev-parse', '--show-toplevel'], root);
+      report.checks.push({ name, ok: true });
+    }
     name = 'Codex実行ファイル';
     const codex = locate();
     report.executables = { codex };

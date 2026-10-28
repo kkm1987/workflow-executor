@@ -27,7 +27,7 @@ node src/cli.js start <対象リポジトリ> agent-docs\request.md
 node src/cli.js run <ID>
 ```
 
-OpenSpec changeを指定して開始する場合は`start-change <対象リポジトリ> [change名]`を使う。以降のCLI操作例は下記を参照。
+OpenSpec changeを指定して開始する場合は`start-change <対象リポジトリ> [change名] [--store <id>]`を使う。storeを省略すると、OpenSpecが対象から最寄りの`openspec/`、その`store:`宣言、グローバルの既定storeの順で解決する。開始時のルートとstoreを保存し、以降の検証・アーカイブでも固定して使う。ルートはGitの作業ツリーである必要がある。以降のCLI操作例は下記を参照。
 
 この作業環境では、このリポジトリ内とCodex・Claude Codeのユーザー用skillディレクトリに登録済み。普段の開発対象を開いたチャットからskillを引数なしで呼ぶと、OpenSpecの次に実行すべきchangeの選定から開始する。change名や自由記述の要求を指定して開始することもできる。
 
@@ -64,7 +64,7 @@ Windowsでは実行時に`features.prefer_mxc=true`を指定し、互換性と�
 
 ダッシュボードは回答待ち、利用枠不足、復旧・再計画待ち、成果確認可能、進行中の順にまとめ、詳細に停止理由・質問・成果と検証へのリンクを置く。工程報告の`report`には対象、判断と理由、検証結果、残件を記録する。判断なしは空配列、未検証と残件なしは明記する。履歴の担当・対象は次タスクやモデル変更後も保持し、失敗時は報告を補わずログを参照する。旧履歴はsummaryを表示し、追加項目は未記録とする。完了はクライアントの承認を意味しない。実行中は10秒ごとと工程境界で更新される。閲覧中のエディターが自動再読み込みしない場合は再度開く。
 
-`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。元ストリームは`codex.jsonl`または`claude.jsonl`、Claudeの最終resultは従来どおり`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
+`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。元ストリームは`codex.jsonl`または`claude.jsonl`、Claudeの最終resultは従来どおり`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。OpenSpecのルートが別の場所にある場合は、証拠の`openspec`にルート・storeと`openspec/`配下の前後記録・変更ファイルを別に保存する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
 
 Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions/`（未指定なら`~/.codex/sessions/`）へ保存する。開発対象には保存しない。直近の質問の工程・CLI・モデル・推論レベル・セッションIDだけを状態に保持し、一致する場合は回答だけを渡して再開する。不一致・再開失敗・retryは回答を含む新規コンテキストに戻し、工程が進めばセッションを捨てる。`kind`のない旧状態はrequestとして読み、completedの記録は書き換えない。
 

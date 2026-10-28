@@ -8,7 +8,7 @@ const [command, ...args] = process.argv.slice(2);
 const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   工程: 計画（要求・粒度・設計）→ 実装 → 独立レビュー → 最終確認
   start <対象ディレクトリ> <要求ファイル>
-  start-change <対象> [change名] [--model <工程> <モデル> [推論レベル]]...
+  start-change <対象> [change名] [--store <id>] [--model <工程> <モデル> [推論レベル]]...
   model <ID> <工程> <モデル> [推論レベル]
   archive <ID>                 completedのchangeを同期・アーカイブ
   step <ID>                     次の1工程を実行
@@ -37,16 +37,23 @@ try {
     else if (command === 'start-change') {
       const target = args.shift();
       if (!target) throw new Error(help);
-      const change = args[0] && args[0] !== '--model' ? args.shift() : undefined;
+      const change = args[0] && !args[0].startsWith('--') ? args.shift() : undefined;
       const models = {};
+      let store;
       while (args.length) {
-        if (args.shift() !== '--model' || args.length < 2) throw new Error(help);
+        const option = args.shift();
+        if (option === '--store') {
+          if (store || !args[0] || args[0].startsWith('--')) throw new Error(help);
+          store = args.shift();
+          continue;
+        }
+        if (option !== '--model' || args.length < 2) throw new Error(help);
         const stage = args.shift();
         const model = args.shift();
-        const effort = args[0] && args[0] !== '--model' ? args.shift() : undefined;
+        const effort = args[0] && !args[0].startsWith('--') ? args.shift() : undefined;
         models[stage] = { model, effort };
       }
-      state = await startChange(resolve(target), change, models);
+      state = await startChange(resolve(target), change, models, undefined, undefined, store);
     }
     else if (command === 'status' && !args.length) console.log(JSON.stringify(list().map(state => summary(state)), null, 2));
     else {

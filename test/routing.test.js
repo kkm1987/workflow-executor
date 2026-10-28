@@ -43,7 +43,7 @@ test('既定割り当てと固定値を検証し、不正なCLI・モデル・�
 test('開始時と途中の上書きを保存し、変更は次の割り当てに反映される', async t => {
   const { target, base } = fixture(t);
   const state = await startChange(target, 'sample-change', { execute: { model: 'gpt-6-luna', effort: 'high' } }, base,
-    async () => JSON.stringify({ changes: [{ name: 'sample-change', totalTasks: 2, completedTasks: 0 }] }));
+    async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 2, completedTasks: 0 }] }));
   state.stage = 'execute';
   const previous = assignment(state);
   setModel(state, 'execute', 'claude-opus-5-5', 'low', base);
@@ -143,7 +143,7 @@ test('preflightは使用するCLIだけを検査し、同じCodexパスと版を
   assert.equal(report.executables.codex, 'resolved-codex');
   assert.equal(report.checks.find(entry => entry.name === 'Codex CLI').version, '1.2.3');
   state.kind = 'change';
-  report = await preflight(state, check, () => 'resolved-codex', () => 'claude');
+  report = await preflight(state, check, () => 'resolved-codex', () => 'claude', async () => JSON.stringify({ root: { path: target } }));
   assert.ok(report.ok);
   assert.ok(calls.some(([command, args]) => command === 'claude' && args[0] === 'auth'));
 });
@@ -266,7 +266,7 @@ test('実際のOpenSpecで候補を列挙し、候補なし・指定なしを開
 test('changeの1タスク群でも独立レビューと最終確認を通り、差し戻しはprereviewへ戻る', async t => {
   const { target, base } = fixture(t);
   const state = await startChange(target, 'sample-change', {}, base,
-    async () => JSON.stringify({ changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
+    async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
   const stages = [];
   await run(state, async current => {
     stages.push(current.stage);
@@ -288,7 +288,7 @@ test('changeの1タスク群でも独立レビューと最終確認を通り、�
 test('prereviewの範囲外変更と検証失敗はfailedにし、選定前の質問を受け付ける', async t => {
   const { target, base } = fixture(t);
   const state = await startChange(target, 'sample-change', {}, base,
-    async () => JSON.stringify({ changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
+    async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
   await step(state, async current => {
     current.evidence = [{ attempt: current.attempts, changedFiles: ['src/outside.js'] }];
     return prereview;

@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { createReadStream, lstatSync, readlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export async function snapshot(target, path) {
-  const git = args => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+export async function snapshot(target, path, pathspec = []) {
+  const git = args => execFileSync('git', ['-C', target, ...args, '--', ...pathspec], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   const names = new Set(git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']).split('\0').filter(Boolean));
   const files = Object.create(null);
   for (const name of names) {

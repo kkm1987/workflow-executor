@@ -145,6 +145,7 @@ export function summary(state, base = dataRoot) {
       nextAction: entry.valid ? '利用時点の期限・対象・用途を確認' : '再測定・再登録が必要です' })),
     id: state.id, target: state.target, status: state.status, stage: state.stage,
     kind: state.kind ?? 'request', change: state.change ?? null,
+    ...(state.kind === 'change' ? { openspec: state.openspec ?? { root: state.target, store: null } } : {}),
     name: state.requirement.split(/\r?\n/).find(line => line.trim())?.replace(/^#+\s*/, '').trim().slice(0, 32) || '案件',
     statusLabel: { ready: '実行待ち', running: '実行中', waiting: '回答待ち', failed: '技術的失敗', blocked: '手戻り上限', completed: '成果確認可能', limited: '利用枠不足' }[state.status],
     stageLabel: { plan: '計画', prereview: '実行前レビュー', granularity: '旧粒度確認', architecture: '旧設計確認', execute: '実装', review: '独立レビュー', acceptance: '最終確認' }[state.stage],
@@ -353,7 +354,9 @@ export function prompt(state, at = Date.now()) {
     acceptance: '要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',
   }[state.stage];
   return `Workflow Executorの${state.stage}工程。${instruction}\n` +
-    '対象のAGENTS.mdを守る。既存の無関係な変更を保持する。コミット、push、公開、外部への送信はしない。plan・review・acceptance工程ではファイルを編集しない。prereviewは選定したopenspec/changes/<change>/内だけ編集可能。\n' +
+    '対象のAGENTS.mdを守る。既存の無関係な変更を保持する。コミット、push、公開、外部への送信はしない。plan・review・acceptance工程ではファイルを編集しない。' +
+    `prereviewは選定した${join(state.openspec?.root ?? state.target, 'openspec', 'changes', state.change ?? '<change>')}内だけ編集可能。\n` +
+    (state.openspec?.store ? `OpenSpecのコマンドには --store ${JSON.stringify(state.openspec.store)} を付ける。\n` : '') +
     (state.kind === 'change' ? '対象changeのproposal・仕様の差分・design・全tasksを読む。executeは最初の未完了タスク群だけをapplyし、該当tasks.mdの完了状態を更新する。reviewはその実装を独立確認する。acceptanceはタスク群1件でも必ず全仕様の差分・全タスクと実装・検証結果を照合し、工程間の不整合と無関係な変更を確認する。\n' : '') +
     'クライアントの判断が必要なら推測で進めずoutcome=questionとしてquestionに質問を書く。\n' +
     '実行環境やツールのエラーで作業できない場合はoutcome=error、question=""とし、summaryに具体的なエラーを書く。環境エラーをクライアントへの仕様質問にしない。\n' +

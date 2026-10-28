@@ -8,7 +8,7 @@ import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
 import { assignment, readConfig } from './config.js';
 import { resolveCodex, spawnCommand } from './commands.js';
-import { validatePrereview } from './changes.js';
+import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories } from './changes.js';
 import { rateLimits, insufficient, limitError } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
@@ -29,13 +29,14 @@ export function codexArgs(state, dir) {
   const value = assignment(state);
   const session = resumeSession(state);
   const mode = ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
+  const paths = [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   return ['exec', ...(session ? ['resume', session.sessionId] : []), '--json',
     ...(!session ? ['--color', 'never', '-C', state.target] : []),
     ...(value.model ? ['-m', value.model] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
     ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
-    ...(mode === 'workspace-write' && state.grants?.paths?.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(state.grants.paths)}`] : []),
+    ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
     ...(session ? ['-c', `sandbox_mode="${mode}"`] : ['--sandbox', mode]),
     '-c', 'approval_policy="never"',
     '--output-schema', schemaPath(state),
@@ -49,7 +50,7 @@ export function claudeArgs(state, sessionId) {
   if (state.stage === 'prereview') {
     tools.push('Bash(openspec list:*)', 'Bash(openspec show:*)', 'Bash(openspec status:*)', 'Bash(openspec validate:*)');
     for (const name of state.change ? [state.change] : state.candidates.map(item => item.name)) {
-      const path = `${state.target.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
+      const path = `${openSpecRoot(state).root.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
       tools.push(`Edit(${path})`, `Write(${path})`);
     }
   } else if (state.stage === 'execute') {
@@ -57,9 +58,10 @@ export function claudeArgs(state, sessionId) {
     if (state.grants?.network) tools.push('WebFetch', 'WebSearch');
   }
   const granted = state.stage === 'execute' ? state.grants : null;
+  const paths = [...(granted?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   return ['-p', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--tools', `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
-    ...(granted?.paths?.length ? ['--add-dir', ...granted.paths] : []),
+    ...(paths.length ? ['--add-dir', ...paths] : []),
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
     '--output-format', 'stream-json', '--verbose', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
     ...(session ? ['--resume', session.sessionId] : ['--session-id', sessionId]),
@@ -163,10 +165,16 @@ async function invokeAgent(state, dir, command, prefix = []) {
 export async function runAgent(state, dir, command, prefix = []) {
   let evidence;
   let before;
+  let specBefore;
   if (['execute', 'prereview'].includes(state.stage)) {
     evidence = { attempt: state.attempts, before: join(dir, 'before.json'), after: join(dir, 'after.json'),
       log: join(dir, assignment(state).cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl') };
     before = await snapshot(state.target, evidence.before);
+    if (separateOpenSpec(state)) {
+      evidence.openspec = { ...openSpecRoot(state), before: join(dir, 'openspec-before.json'), after: join(dir, 'openspec-after.json') };
+      delete evidence.openspec.source;
+      specBefore = await snapshot(evidence.openspec.root, evidence.openspec.before, ['openspec']);
+    }
     state.evidence ??= [];
     state.evidence.push(evidence);
   }
@@ -178,6 +186,10 @@ export async function runAgent(state, dir, command, prefix = []) {
     if (evidence) {
       try { evidence.changedFiles = changedFiles(before, await snapshot(state.target, evidence.after)); }
       catch (error) { failure ??= error; }
+      if (evidence.openspec) {
+        try { evidence.openspec.changedFiles = changedFiles(specBefore, await snapshot(evidence.openspec.root, evidence.openspec.after, ['openspec'])); }
+        catch (error) { failure ??= error; }
+      }
     }
   }
   if (failure) throw failure;
@@ -261,7 +273,7 @@ async function executeStep(state, runner, base, limits, validate) {
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
     if (state.stage === 'prereview') {
       const evidence = state.evidence?.findLast(entry => entry.attempt === state.attempts);
-      await validate(state, result, evidence?.changedFiles ?? []);
+      await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence);
     }
     if (result.outcome === 'error' && limitError(result.summary)) {
       const error = new Error(result.summary);
