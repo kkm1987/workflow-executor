@@ -1,9 +1,27 @@
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { statSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { openSpecRoot, storeArgs, runOpenSpec } from './changes.js';
+import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
 import { resolveCodex, resolveExecutable, spawnCommand } from './commands.js';
 import { assignment, stagesFor } from './config.js';
+
+export async function checkGrantAccess(state, paths, check = checkCommand) {
+  if (!paths.length) return;
+  const codex = assignment({ ...state, stage: 'execute' }).cli === 'codex';
+  const roots = [...(state.grants?.paths ?? []), ...paths, ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+  for (const path of paths) {
+    try {
+      if (codex) {
+        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', '-P', ':workspace', '-C', state.target,
+          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
+          '-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`,
+          '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target);
+      } else readdirSync(path);
+    } catch {
+      throw new Error(`OSのアクセス権で読み取れません。アクセス権の修正が必要です: ${path}`);
+    }
+  }
+}
 
 // 出力には認証情報が含まれる可能性があるため、検査名と終了状態だけを保存する。
 export function checkCommand(command, args, cwd, timeout = 15_000) {

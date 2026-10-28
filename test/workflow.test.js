@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { root, create, load, save, answer, grant, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
 import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../src/executor.js';
-import { preflight as nativePreflight, checkCommand } from '../src/preflight.js';
+import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
@@ -269,7 +269,7 @@ test('実装の途中終了は正常系で、同じ工程の実行待ちに戻�
   assert.equal(state.status, 'blocked');
 });
 
-test('権限要求は回答待ちになり、許可は保存されて次の実行引数へ反映される', t => {
+test('権限要求は回答待ちになり、許可は保存されて次の実行引数へ反映される', async t => {
   const { state, base } = fixture(t);
   state.tasks = [{ ...task, status: 'pending' }];
   state.stage = 'execute';
@@ -277,12 +277,64 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   advance(state, { report, outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
   assert.equal(state.status, 'waiting');
   assert.equal(summary(state, base).permission.network, true);
-  assert.throws(() => grant(state, { paths: [homedir()] }, base), /許可できない/);
-  grant(state, { network: true, paths: [outside] }, base);
+  await assert.rejects(grant(state, { paths: [homedir()] }, base, passed), /許可できない/);
+  await grant(state, { network: true, paths: [outside] }, base, passed);
   assert.equal(state.status, 'ready');
   assert.ok(codexArgs(state, base).includes('sandbox_workspace_write.network_access=true'));
   assert.ok(codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
   assert.throws(() => validateResult({ report, outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
+});
+
+test('アクセス確認に失敗した許可は保存せず、修正後に同じパスで再開できる', async t => {
+  const { state, base, target } = fixture(t);
+  state.stage = 'execute';
+  const permission = { network: true, paths: [target] };
+  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'アクセスが必要', permission, tasks: [] });
+  save(state, base);
+  const before = structuredClone(state);
+  let accessible = false;
+  const check = async (current, paths) => {
+    assert.equal(current, state);
+    assert.equal(paths.length, 1);
+    if (!accessible) throw new Error(`OSのアクセス権の修正が必要: ${paths[0]}`);
+  };
+  await assert.rejects(grant(state, permission, base, check), /OSのアクセス権/);
+  assert.deepEqual(state, before);
+  assert.equal(load(state.id, base).status, 'waiting');
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.at(-1).type, 'grant-rejected');
+  assert.equal(events.at(-1).detail.paths.length, 1);
+  assert.ok(!events.some(entry => ['granted', 'answered'].includes(entry.type)));
+  accessible = true;
+  await grant(state, permission, base, check);
+  assert.equal(state.status, 'ready');
+  assert.equal(state.permission, undefined);
+  assert.equal(state.grants.paths.length, 1);
+  assert.equal(state.answers.length, 1);
+});
+
+test('許可の確認はCodexの実装用設定を使い、Claudeは直接読み取り、ネットワークだけなら省略する', async t => {
+  const { state, target, base } = fixture(t);
+  state.executables = { codex: 'saved-codex' };
+  state.grants = { paths: [base], network: false };
+  state.kind = 'change'; state.change = 'sample';
+  state.openspec = { root: base, store: 'store' };
+  const calls = [];
+  const check = async (...args) => { calls.push(args); };
+  await checkGrantAccess(state, [target], check);
+  assert.equal(calls[0][0], 'saved-codex');
+  const args = calls[0][1];
+  assert.deepEqual(args.slice(0, 5), ['sandbox', '-P', ':workspace', '-C', target]);
+  assert.ok(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base, target, join(base, 'openspec', 'changes', 'sample')])}`));
+  assert.ok(args.at(-1).includes('readdirSync'));
+  await assert.rejects(checkGrantAccess(state, [target], async () => { throw new Error('secret'); }), error => error.message.includes(target) && !error.message.includes('secret'));
+  state.models = { execute: { model: 'claude-opus-5-5' } };
+  await checkGrantAccess(state, [target], async () => { assert.fail('Claudeでは起動しない'); });
+  await assert.rejects(checkGrantAccess(state, [join(target, 'missing')]), /OSのアクセス権/);
+  state.stage = 'execute';
+  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'ネットワークが必要', permission: { network: true, paths: [] }, tasks: [] });
+  await grant(state, { network: true }, base, async () => { assert.fail('パスなしでは確認しない'); });
+  assert.equal(state.status, 'ready');
 });
 
 test('実行例外と不正な結果は失敗として永続化され、成功に進まない', async t => {

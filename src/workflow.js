@@ -7,6 +7,7 @@ import { validateModel, stagesFor, readConfig } from './config.js';
 import { readEvidence, currentEvidence, evidenceInput } from './external-evidence.js';
 import { artifactCase } from './dashboard-artifact.js';
 import { publishStatus, requestPublish } from './publish.js';
+import { checkGrantAccess } from './preflight.js';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const dataRoot = join(root, 'data');
@@ -16,7 +17,7 @@ const MAX_PARTIALS = 10;
 
 export function validateResult(result, stage) {
   if (!stages.includes(stage)) throw new Error('工程が不正です');
-  if (!result || !['ok', 'question', 'revise', 'error', 'partial', 'permission'].includes(result.outcome) ||
+  if (!result || !['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval'].includes(result.outcome) ||
       typeof result.summary !== 'string' || !result.summary.trim() || typeof result.question !== 'string' ||
       !Array.isArray(result.tasks)) throw new Error('工程の応答形式が不正です');
   if (['question', 'permission'].includes(result.outcome) && !result.question.trim()) throw new Error('質問が空です');
@@ -25,7 +26,7 @@ export function validateResult(result, stage) {
       !Array.isArray(report.decisions) || report.decisions.some(value => typeof value !== 'string' || !value.trim())) {
     throw new Error('工程報告には対象・判断と理由・検証結果・残件が必要です');
   }
-  if (['partial', 'permission'].includes(result.outcome) && stage !== 'execute') throw new Error('この工程では使えない結果です');
+  if (['partial', 'permission', 'approval'].includes(result.outcome) && stage !== 'execute') throw new Error('この工程では使えない結果です');
   if (result.outcome === 'permission' && !result.permission?.network && !result.permission?.paths?.length) {
     throw new Error('権限要求にはネットワークまたはパスが必要です');
   }
@@ -45,6 +46,11 @@ export function validateResult(result, stage) {
   if (stage === 'plan' && result.outcome === 'ok' &&
       ['requirements', 'granularity', 'architecture'].some(key => typeof result.decisions?.[key] !== 'string' || !result.decisions[key].trim())) {
     throw new Error('計画には要求整理・粒度判定・設計判定の根拠が必要です');
+  }
+  if (stage === 'prereview' && result.outcome === 'ok' &&
+      (!Array.isArray(result.approvals) || result.approvals.some(item =>
+        ['tasks', 'action', 'limits', 'stopWhen'].some(key => typeof item?.[key] !== 'string' || !item[key].trim())))) {
+    throw new Error('承認計画には対象タスク・操作・上限・停止条件が必要です');
   }
   return result;
 }
@@ -72,10 +78,10 @@ export function advance(state, result) {
     return;
   }
   delete state.partials;
-  if (result.outcome === 'revise') {
+  if (['revise', 'approval'].includes(result.outcome)) {
     state.revisions += 1;
     state.status = state.revisions > 3 ? 'blocked' : 'ready';
-    state.stage = state.kind === 'change' ? 'prereview' : 'plan';
+    state.stage = result.outcome === 'approval' || state.kind === 'change' ? 'prereview' : 'plan';
     return;
   }
   if (['plan', 'prereview'].includes(state.stage)) {
@@ -84,6 +90,13 @@ export function advance(state, result) {
     state.tasks = [...completed, ...result.tasks.map(task => ({ ...task, status: 'pending' }))];
     state.decisions = result.decisions;
     state.stage = 'execute';
+    if (result.approvals?.length && !(state.approval?.status === 'approved' &&
+        JSON.stringify(state.approval.items) === JSON.stringify(result.approvals))) {
+      state.approval = { status: 'pending', items: result.approvals, conditions: '', proposedAt: now(), approvedAt: null };
+      state.status = 'waiting';
+      state.question = `承認計画の確認が必要です（${result.approvals.length}件）`;
+      return;
+    }
   } else if (state.stage === 'execute') {
     state.tasks.find(task => task.status !== 'completed').result = result.summary;
     state.stage = 'review';
@@ -156,6 +169,10 @@ export function summary(state, base = dataRoot) {
   result.latestReport = result.history.findLast(entry => entry.report) ?? null;
   if (state.status === 'waiting') {
     result.question = state.question;
+    if (state.approval?.status === 'pending') {
+      result.approval = state.approval;
+      result.nextAction = `承認計画の確認が必要です（${state.approval.items.length}件）`;
+    }
     if (state.permission) result.permission = state.permission;
   }
   if (state.status === 'failed') result.error = state.error;
@@ -221,6 +238,7 @@ export function dashboard(base = dataRoot, { config, launch, at } = {}) {
       for (const entry of view.externalEvidence) lines.push('', `証拠 ${cell(entry.name)} (#${entry.id}): ${cell(entry.subject)} / ${cell(entry.host)} / 測定 ${cell(entry.observedAt)} / 期限 ${cell(entry.expiresAt)} / ${entry.valid ? '有効' : '期限切れ・再測定・再登録が必要'} / 出典 ${cell(entry.source)} / [保存内容](${state.id}/state.json#externalEvidence/${entry.id})`);
       if (state.status === 'limited') lines.push('', `利用枠: ${cell(JSON.stringify(state.rateLimits))}`, '', cell(view.nextAction));
       if (state.status === 'waiting') lines.push('', `停止理由: ${cell(state.lastResult)}`, '', `質問: ${cell(state.question)}`);
+      if (view.approval) for (const item of view.approval.items) lines.push('', `承認対象: ${cell(item.tasks)} / 操作: ${cell(item.action)} / 上限: ${cell(item.limits)} / 停止条件: ${cell(item.stopWhen)}`);
       if (state.status === 'failed') lines.push('', `停止理由: ${cell(state.error)}`);
       if (state.status === 'blocked') lines.push('', `差し戻し理由: ${cell(state.lastResult)}`);
       if (state.status === 'completed') lines.push('', `[成果](${url(state.target)}/) · [検証結果](${state.id}/attempt-${String(state.attempts).padStart(4, '0')}/result.json)`, '', `結果: ${cell(state.lastResult)}`);
@@ -265,10 +283,26 @@ export function answer(state, text, base = dataRoot) {
   if (state.status !== 'waiting') throw new Error('回答待ちではありません');
   if (!text.trim()) throw new Error('回答が空です');
   state.answers.push({ stage: state.stage, question: state.question, answer: text });
+  if (state.approval?.status === 'pending') {
+    delete state.approval;
+    delete state.session;
+    state.stage = 'prereview';
+  }
   state.question = '';
   delete state.permission;
   state.status = 'ready';
   event(state, 'answered', state.answers.at(-1), base);
+  save(state, base);
+}
+
+export function approve(state, conditions = '', base = dataRoot) {
+  if (state.status !== 'waiting' || state.approval?.status !== 'pending') throw new Error('承認待ちではありません');
+  if (typeof conditions !== 'string') throw new Error('承認条件は文字列で指定してください');
+  state.approval = { ...state.approval, status: 'approved', conditions, approvedAt: now() };
+  state.question = '';
+  state.status = 'ready';
+  delete state.session;
+  event(state, 'approved', state.approval, base);
   save(state, base);
 }
 
@@ -287,7 +321,7 @@ export function registerEvidence(state, path, base = dataRoot) {
 const secretDirs = ['.ssh', '.aws', '.gnupg', '.azure', '.kube', '.docker'];
 
 // 権限要求の許可。保存した許可は以後の全工程の実行で有効になり、回答として同じセッションへ伝える。
-export function grant(state, { network = false, paths = [] }, base = dataRoot) {
+export async function grant(state, { network = false, paths = [] }, base = dataRoot, check = checkGrantAccess) {
   if (state.status !== 'waiting' || !state.permission) throw new Error('権限要求の回答待ちではありません');
   if (!network && !paths.length) throw new Error('許可するネットワークまたはパスを指定してください');
   const home = realpathSync(homedir());
@@ -300,6 +334,12 @@ export function grant(state, { network = false, paths = [] }, base = dataRoot) {
         (inside(home, real) && secretDirs.includes(relative(home, real).split(sep)[0]))) throw new Error(`許可できないパスです: ${path}`);
     return real;
   });
+  if (resolved.length) {
+    try { await check(state, resolved); } catch (error) {
+      event(state, 'grant-rejected', { paths: resolved, reason: error.message }, base);
+      throw error;
+    }
+  }
   state.grants ??= { network: false, paths: [] };
   state.grants.network ||= network;
   state.grants.paths = [...new Set([...state.grants.paths, ...resolved])];
@@ -348,7 +388,7 @@ export function prompt(state, at = Date.now()) {
   const planning = ['plan', 'prereview'].includes(state.stage);
   const instruction = {
     plan: '要求整理→粒度判定→設計判定の順に行う。decisions.requirementsに要求と受け入れ条件の判断根拠、decisions.granularityに未完了タスクの粒度と順序の根拠、decisions.architectureに既存構成に基づく最も単純な設計の根拠を記す。差し戻し理由を反映し、検証可能な受け入れ条件を持つ未完了タスクを定義する。',
-    prereview: '候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。',
+    prereview: '作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する。候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。',
     execute: '最初の未完了タスクだけを実装し、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。許可されるまで推測で回避しない。',
     review: '最初の未完了タスクの実装を独立してレビューする。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
     acceptance: '要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',

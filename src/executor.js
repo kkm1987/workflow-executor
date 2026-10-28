@@ -48,6 +48,7 @@ export function claudeArgs(state, sessionId) {
   const session = resumeSession(state);
   const tools = ['Read', 'Glob', 'Grep'];
   if (state.stage === 'prereview') {
+    tools.push('Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(ls:*)');
     tools.push('Bash(openspec list:*)', 'Bash(openspec show:*)', 'Bash(openspec status:*)', 'Bash(openspec validate:*)');
     for (const name of state.change ? [state.change] : state.candidates.map(item => item.name)) {
       const path = `${openSpecRoot(state).root.replaceAll('\\', '/')}/openspec/changes/${name}/**`;

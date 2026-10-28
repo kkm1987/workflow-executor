@@ -70,7 +70,7 @@ try {
           else if (args[i] === '--path' && args[i + 1]) options.paths.push(args[++i]);
           else throw new Error(help);
         }
-        grant(state, options);
+        await grant(state, options);
       }
       else if (command === 'retry') retry(state);
       else if (command === 'evidence') registerEvidence(state, args[1]);

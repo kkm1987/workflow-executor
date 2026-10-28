@@ -124,12 +124,15 @@ test('Claudeの引数・構造化出力・usageを解釈し、不正応答はfai
   assert.equal(state.status, 'failed');
   assert.match(state.error, /構造化出力/);
   state.kind = 'change'; state.stage = 'prereview'; state.change = 'sample-change';
+  assert.ok(inputFor(state).includes('作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する'));
   const args = claudeArgs(state, 'new-session');
   assert.ok(args.includes('--json-schema'));
   assert.ok(args.includes('dontAsk'));
   assert.ok(args.includes('new-session'));
   assert.ok(args.some(arg => arg.startsWith('Write(') && arg.endsWith('/sample-change/**)')));
   assert.ok(!args.includes('Bash'));
+  for (const command of ['git status', 'git diff', 'git log', 'git show', 'ls']) assert.ok(args.includes(`Bash(${command}:*)`));
+  assert.ok(!args.includes('Bash(git:*)'));
 });
 
 test('preflightは使用するCLIだけを検査し、同じCodexパスと版を保存する', async t => {
