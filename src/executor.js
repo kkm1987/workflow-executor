@@ -34,7 +34,7 @@ export function codexArgs(state, dir) {
     ...(!session ? ['--color', 'never', '-C', state.target] : []),
     ...(value.model ? ['-m', value.model] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
-    ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
+    ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
     ...(session ? ['-c', `sandbox_mode="${mode}"`] : ['--sandbox', mode]),

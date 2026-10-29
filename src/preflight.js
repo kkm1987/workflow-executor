@@ -12,13 +12,15 @@ export async function checkGrantAccess(state, paths, check = checkCommand) {
   for (const path of paths) {
     try {
       if (codex) {
-        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', '-P', ':workspace', '-C', state.target,
-          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
-          '-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`,
+        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', '-P', process.platform === 'win32' ? 'workflow-grant' : ':workspace', '-C', state.target,
+          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
+          ...(process.platform === 'win32' ? ['-c', 'permissions.workflow-grant.extends=":workspace"',
+            '-c', `permissions.workflow-grant.workspace_roots={${[...new Set(roots)].map(root => `${JSON.stringify(root)}=true`).join(',')}}`] :
+            ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`]),
           '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target);
       } else readdirSync(path);
     } catch {
-      throw new Error(`OSのアクセス権で読み取れません。アクセス権の修正が必要です: ${path}`);
+      throw new Error(`アクセス確認に失敗しました。OSのアクセス権・サンドボックス設定・管理ポリシーを確認してください: ${path}`);
     }
   }
 }
@@ -60,7 +62,8 @@ export function checkCommand(command, args, cwd, timeout = 15_000) {
 }
 
 export async function preflight(state, check = checkCommand, locate = resolveCodex, locateClaude = () => resolveExecutable('claude'), spec = runOpenSpec) {
-  const report = { startedAt: new Date().toISOString(), target: state.target, checks: [], ok: false };
+  const report = { startedAt: new Date().toISOString(), target: state.target, checks: [], ok: false,
+    ...(process.platform === 'win32' ? { requestedWindowsSandbox: 'elevated' } : {}) };
   let name = '開発対象';
   try {
     if (!statSync(state.target).isDirectory()) throw new Error('ディレクトリではありません');
@@ -84,7 +87,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       ['Codex認証', codex, ['login', 'status']],
       ...[':read-only', ':workspace'].map(profile => [
         `サンドボックス ${profile}`, codex, ['sandbox', '-P', profile, '-C', state.target,
-          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=true'] : []),
+          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
           '--', process.execPath, '-e', 'process.exit(0)'],
       ]),
     ];

@@ -54,7 +54,9 @@ node src/cli.js archive <ID>
 
 WindowsのCodex実行ファイルは`%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`の更新日時が最新のもの、次に`PATH`の`codex`を探す。解決したパスをpreflight・本実行・利用枠取得で共有し、パスと版をpreflight記録へ残す。Claudeを使う工程があるときだけClaudeの起動・認証も確認する。
 
-Windowsでは実行時に`features.prefer_mxc=true`を指定し、互換性と管理ポリシーが許す場合にMXCを優先する。未対応端末ではCLIの従来方式へ戻る。[Windowsサンドボックスの公式仕様](https://learn.chatgpt.com/docs/windows/windows-sandbox)に従い、ユーザーの設定ファイルは変更しない。環境・ツールのエラーは仕様の質問と分けて失敗として扱う。
+Windowsでは新規実行・resume・両プロファイルの実行前確認・grant確認に`features.prefer_mxc=false`と`windows.sandbox=elevated`を指定する。ユーザー設定は変更せず、既存の読み書き・ネットワーク制限と管理ポリシーを維持する。grant確認は呼び出し単位の`workflow-grant`プロファイルで`:workspace`を継承し、追加パスと別ストアの対象changeをworkspace_rootsへ反映する。管理ポリシーで許可プロファイルを限定している場合は、端末管理者による同プロファイルの許可が必要。端末管理者が事前にelevatedの初期セットアップと対象・追加パス・別OpenSpecストアのアクセス権を準備し、失敗時のセットアップ・ACL・管理ポリシーも復旧する。自動昇格や別方式への自動切り替えは行わない。preflightの`requestedWindowsSandbox: "elevated"`は要求値であり、適用確認済みを意味しない。
+
+MXC利用時の停止中案件を移行する際は、実行器と子プロセスの停止および対象の途中の差分を確認する。`failed`／中断済み`running`／`limited`は`node src/cli.js retry <ID>`で旧セッションを破棄する。`waiting`／`ready`は`status`で現在の工程・有効なモデル・推論レベルを確認し、`node src/cli.js model <ID> <現在の工程> <同じモデル> [同じ推論レベル]`で同値を再設定する。同値でも当該工程のセッションを破棄し、質問・許可要求・承認待ちは保持する。必要な`answer`／`grant`／`approve`後に`run`で実行前確認をやり直す。状態JSONや完了済み履歴は直接変更しない。移行前に通常ホストの隔離fixtureで起動・権限境界・編集ツールとシェルの書き込み・回答後のresumeを実測し、成功を確認する。失敗時は運用を停止して原因を復旧する。限定した実測の成功は長期安定性を保証しない。
 
 `run/step`はモデル呼び出し前に、対象ディレクトリ、Git作業ツリー、CLI起動・認証、読み取り用・書き込み用サンドボックスの起動を確認する。各コマンドの制限時間は15秒。対象コードは実行・変更せず、認証コマンドの出力も保存しない。同じ`run`内では1回、別の再開操作では再確認する。結果は`data/<ID>/preflight-*.json`に残り、失敗時はモデルを呼ばず`failed`になる。Windowsでチャットの制限内から別のサンドボックスを起動できない場合は、開発主体が実行環境を確認する。実行器は自動昇格しない。
 

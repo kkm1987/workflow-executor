@@ -478,8 +478,13 @@ test('許可の確認はCodexの実装用設定を使い、Claudeは直接読み
   await checkGrantAccess(state, [target], check);
   assert.equal(calls[0][0], 'saved-codex');
   const args = calls[0][1];
-  assert.deepEqual(args.slice(0, 5), ['sandbox', '-P', ':workspace', '-C', target]);
-  assert.ok(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base, target, join(base, 'openspec', 'changes', 'sample')])}`));
+  assert.deepEqual(args.slice(0, 5), ['sandbox', '-P', process.platform === 'win32' ? 'workflow-grant' : ':workspace', '-C', target]);
+  const roots = [base, target, join(base, 'openspec', 'changes', 'sample')];
+  if (process.platform === 'win32') {
+    assert.ok(args.includes('permissions.workflow-grant.extends=":workspace"'));
+    assert.ok(args.includes(`permissions.workflow-grant.workspace_roots={${roots.map(path => `${JSON.stringify(path)}=true`).join(',')}}`));
+    assert.ok(!args.some(arg => arg.startsWith('sandbox_workspace_write.')));
+  } else assert.ok(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`));
   assert.ok(args.at(-1).includes('readdirSync'));
   await assert.rejects(checkGrantAccess(state, [target], async () => { throw new Error('secret'); }), error => error.message.includes(target) && !error.message.includes('secret'));
   state.models = { execute: { model: 'claude-opus-5-5' } };

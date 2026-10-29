@@ -7,7 +7,7 @@ import { readConfig, validateModel, assignment } from '../src/config.js';
 import { startChange, archive, validatePrereview } from '../src/changes.js';
 import { resolveCodex } from '../src/commands.js';
 import { codexArgs, claudeArgs, runAgent, step, run, resumeSession, inputFor } from '../src/executor.js';
-import { preflight } from '../src/preflight.js';
+import { preflight, checkGrantAccess } from '../src/preflight.js';
 import { parseCodexLimits, parseClaudeLimits, insufficient, limitError } from '../src/limits.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
@@ -17,6 +17,92 @@ const noLimits = async () => null;
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, approvals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
+
+test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '試験', base);
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  try {
+    for (const platform of ['win32', 'linux']) {
+      Object.defineProperty(process, 'platform', { value: platform });
+      const verify = args => {
+        for (const setting of ['features.prefer_mxc=false', 'windows.sandbox=elevated']) {
+          assert.equal(args.includes(setting), platform === 'win32');
+          if (platform === 'win32') assert.equal(args[args.indexOf(setting) - 1], '-c');
+        }
+        assert.ok(!args.includes('features.prefer_mxc=true'));
+      };
+      for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
+        state.kind = stage === 'prereview' ? 'change' : 'request';
+        state.change = 'sample-change';
+        state.stage = stage;
+        state.models = { [stage]: { model: 'gpt-6-luna', effort: 'low' } };
+        state.grants = { paths: [base], network: true };
+        for (const resumed of [false, true]) {
+          state.session = resumed ? { stage, ...assignment(state), sessionId: 'old' } : undefined;
+          const args = codexArgs(state, base);
+          verify(args);
+          assert.equal(args.includes('resume'), resumed);
+          assert.ok(args.includes('approval_policy="never"'));
+          assert.equal(args.includes('sandbox_workspace_write.network_access=true'), ['execute', 'prereview'].includes(stage));
+          assert.equal(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base])}`), ['execute', 'prereview'].includes(stage));
+          assert.ok(args.includes(resumed ? `sandbox_mode="${['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only'}"` : ['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only'));
+          assert.ok(!claudeArgs(state, 'new').some(arg => /prefer_mxc|windows\.sandbox/.test(arg)));
+        }
+      }
+      state.kind = 'request';
+      state.executables = { codex: 'codex' };
+      const calls = [];
+      const report = await preflight(state, async (_, args) => { calls.push(args); return ''; }, () => 'codex');
+      assert.ok(report.ok);
+      assert.equal(report.requestedWindowsSandbox, platform === 'win32' ? 'elevated' : undefined);
+      if (platform !== 'win32') assert.ok(!Object.hasOwn(report, 'requestedWindowsSandbox'));
+      assert.ok(!Object.keys(report).some(key => /effective/i.test(key)));
+      assert.equal(calls.filter(args => args[0] === 'sandbox').length, 2);
+      for (const args of calls.filter(args => args[0] === 'sandbox')) {
+        verify(args);
+        assert.ok(args.includes('--include-managed-config'));
+      }
+      const failed = await preflight(state, async (_, args) => { if (args[0] === 'sandbox') throw new Error('初期化失敗'); }, () => 'codex');
+      assert.equal(failed.ok, false);
+      assert.equal(failed.requestedWindowsSandbox, report.requestedWindowsSandbox);
+      await checkGrantAccess(state, [target], async (_, args) => {
+        verify(args);
+        assert.ok(args.includes('--include-managed-config'));
+        assert.equal(args[2], platform === 'win32' ? 'workflow-grant' : ':workspace');
+        assert.equal(args.some(arg => arg.startsWith('permissions.workflow-grant.workspace_roots=')), platform === 'win32');
+        assert.equal(args.some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')), platform !== 'win32');
+      });
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor);
+  }
+});
+
+test('同値modelとretryは旧セッションを破棄し、待機内容と回答を保持する', t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '試験', base);
+  setModel(state, 'plan', 'gpt-6-luna', 'low', base);
+  for (const status of ['waiting', 'ready', 'failed', 'running', 'limited']) {
+    for (const outcome of ['question', 'permission', 'approval']) {
+      state.status = status;
+      state.waitingFor = outcome;
+      state.question = '確認';
+      state.permission = { paths: [target], network: false };
+      state.answers = [{ stage: 'plan', question: '形式', answer: '文字列' }];
+      state.session = { stage: 'plan', ...assignment(state), sessionId: 'old' };
+      const expected = structuredClone(state);
+      if (['waiting', 'ready'].includes(status)) setModel(state, 'plan', 'gpt-6-luna', 'low', base);
+      else retry(state, base);
+      delete expected.session;
+      if (!['waiting', 'ready'].includes(status)) expected.status = 'ready';
+      expected.updatedAt = state.updatedAt;
+      assert.deepEqual(state, expected);
+      assert.equal(resumeSession(state), null);
+      assert.match(inputFor(state), /文字列/);
+    }
+  }
+});
 
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'routing-'));
