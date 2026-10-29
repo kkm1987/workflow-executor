@@ -19,6 +19,13 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
   for (const kind of ['request', 'change']) {
     for (const stage of stagesFor(kind)) validateModel(config.models?.[kind]?.[stage]);
   }
+  if (config.fallbacks !== undefined) {
+    if (!config.fallbacks || typeof config.fallbacks !== 'object' || Array.isArray(config.fallbacks)) throw new Error('fallbacksの指定が不正です');
+    for (const [kind, values] of Object.entries(config.fallbacks)) {
+      if (!['request', 'change'].includes(kind)) throw new Error('工程が不正です');
+      validateAssignments({ kind, fallbacks: values }, config);
+    }
+  }
   for (const stage of ['plan', ...stagesFor('change')]) {
     for (const window of ['primary', 'secondary']) {
       const value = config.limits?.[stage]?.[window];
@@ -44,3 +51,27 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
 export function assignment(state, config = readConfig()) {
   return validateModel(state.models?.[state.stage] ?? config.models[state.kind ?? 'request'][state.stage]);
 }
+
+export function fallbackAssignment(state, config = readConfig()) {
+  const values = state.fallbacks ?? {};
+  const value = Object.hasOwn(values, state.stage) ? values[state.stage] : config.fallbacks?.[state.kind ?? 'request']?.[state.stage];
+  if (value === undefined || value === null) return null;
+  const result = validateModel(value);
+  if (!result.model) throw new Error('代替モデル名が必要です');
+  if (result.cli === assignment(state, config).cli) throw new Error('代替には別CLIのモデルが必要です');
+  return result;
+}
+
+export function validateAssignments(state, config = readConfig()) {
+  for (const values of [state.models, state.fallbacks]) {
+    if (values === undefined) continue;
+    if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('工程別設定が不正です');
+    for (const stage of Object.keys(values)) if (!stagesFor(state.kind).includes(stage)) throw new Error('工程が不正です');
+  }
+  for (const stage of stagesFor(state.kind)) {
+    assignment({ ...state, stage }, config);
+    fallbackAssignment({ ...state, stage }, config);
+  }
+}
+
+export const attemptAssignment = state => state.attemptAssignment ?? assignment(state);

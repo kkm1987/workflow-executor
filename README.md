@@ -72,7 +72,31 @@ changeの実行前レビューは、未完了タスク全体の承認計画（�
 
 Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions/`（未指定なら`~/.codex/sessions/`）へ保存する。開発対象には保存しない。直近の質問の工程・CLI・モデル・推論レベル・セッションIDだけを状態に保持し、一致する場合は回答だけを渡して再開する。不一致・再開失敗・retryは回答を含む新規コンテキストに戻し、工程が進めばセッションを捨てる。`kind`のない旧状態はrequestとして読み、completedの記録は書き換えない。
 
-各工程の開始前にCodexの`account/rateLimits/read`またはClaudeの`/usage`から残りを取得する。初期固定値はplan・prereview・executeがセッション20%／週10%、review・acceptanceが10%／5%。不足時はモデルを呼ばず`limited`で止まり、別モデルへの変更またはリセット待ちを示す。実行中の上限到達もlimitedとし、`model`または`retry`で新規再開する。取得不能なら未取得として実行し、自動切り替えはしない。固定値は計測の根拠がない初期値であり、実績から見直す。
+各試行前に通常側のCodexの`account/rateLimits/read`またはClaudeの`/usage`から残りを取得する。初期固定値はplan・prereview・executeがセッション20%／週10%、review・acceptanceが10%／5%。通常側が閾値未満のときだけ、指定済みの代替を確認する。代替は取得できた窓が1つ以上あり、そのすべてが同じ閾値以上なら使用する（閾値一致は可）。通常側が全窓取得不能なら通常側で実行する。代替未指定・代替不足・代替の全窓取得不能ではモデルを呼ばず`limited`で停止する。枠はCLI単位で、モデル固有の残枠を保証しない。固定値は計測の根拠がない初期値であり、実績から見直す。
+
+代替は任意の`fallbacks.request/change.<工程>`に1組の`{ "model": "...", "effort": "..." }`を指定する。例えば通常側がCodexのexecuteなら、`workflow.config.json`へ次のトップレベル項目を追加できる。通常・代替が同じCLIになる設定は拒否する。既定の代替は用意しない。
+
+```json
+"fallbacks": {
+  "request": { "execute": { "model": "claude-opus-5-5", "effort": "medium" } },
+  "change": { "execute": { "model": "claude-opus-5-5", "effort": "medium" } }
+}
+```
+
+案件指定は既定値に優先して`state.fallbacks`へ保存する。開始時は`--fallback`を繰り返せる。通常側の`--model`もstart・start-changeで使用でき、すべての指定を組み合わせて検証する。
+
+```text
+node src/cli.js start C:\path\to\target agent-docs\request.md --fallback execute claude-opus-5-5 medium
+node src/cli.js start-change C:\path\to\target sample-change --fallback prereview gpt-6-luna high --fallback execute claude-opus-5-5 medium
+node src/cli.js fallback <ID> execute claude-opus-5-5 medium
+node src/cli.js fallback <ID> execute --disable
+node src/cli.js retry <ID>
+node src/cli.js run <ID>
+```
+
+停止中の`fallback`は設定だけを変更し、質問や停止状態を保持する。`--disable`は案件に`null`を保存して既定の代替も無効化する。`limited`は枠の回復・指定変更後に`retry`、`waiting`は必要な回答・承認後に`run`する。通常側を変更する`model`でも代替との整合性を検証し、不正操作は保存しない。
+
+選択した代替CLIの起動・認証・必要なアクセス確認に失敗した場合は、モデルを起動せず`failed`で止まる。未選択の代替CLIは必須確認に含めない。承認・許可・工程の編集制限は切替後も維持する。通常設定は変更せず、次試行は通常側から再判定する。担当が変われば要求・回答・承認・証拠を含む完全入力を使い、同じ担当で条件を満たす回答後はセッションを再開する。実行中の上限到達は途中の記録を保存して`limited`で止まり、自動切替・自動再試行はしない。変更を確認して`retry`する。候補別の枠と選択理由はイベント・status・ダッシュボード、実担当は試行履歴・invocation・metricsで確認できる。
 
 実行エラー・Ctrl+Cでは`failed`になる。対象の差分とログを確認して原因を解消し、`node src/cli.js retry <ID>`を実行する。同じ工程を新しいコンテキストで再実行するため、途中の変更を確認すること。自動ロールバックは行わない。
 

@@ -4,7 +4,7 @@ import { reserve } from './locking.js';
 import { resolve, join } from 'node:path';
 import { capture } from './commands.js';
 import { create, save, event, dataRoot, validChangeName } from './workflow.js';
-import { validateModel, stagesFor } from './config.js';
+import { validateModel, validateAssignments, stagesFor } from './config.js';
 
 const openspec = fileURLToPath(new URL('../node_modules/@fission-ai/openspec/bin/openspec.js', import.meta.url));
 export const runOpenSpec = (target, args) => capture(process.execPath, [openspec, ...args], target, 60_000);
@@ -14,13 +14,14 @@ export const storeArgs = state => openSpecRoot(state).store ? ['--store', openSp
 export const changeDirectories = state => (state.change ? [state.change] : state.candidates.map(item => item.name))
   .map(name => join(openSpecRoot(state).root, 'openspec', 'changes', name));
 
-export async function startChange(target, change, models = {}, base = dataRoot, execute = runOpenSpec, store) {
+export async function startChange(target, change, models = {}, base = dataRoot, execute = runOpenSpec, store, fallbacks = {}) {
   if (change !== undefined && !validChangeName(change)) throw new Error('change名が不正です');
   const normalized = {};
   for (const [stage, value] of Object.entries(models)) {
     if (!stagesFor('change').includes(stage)) throw new Error('工程が不正です');
     normalized[stage] = validateModel(value);
   }
+  validateAssignments({ kind: 'change', models: normalized, fallbacks });
   const { changes, root } = JSON.parse(await execute(target, ['list', '--json', ...(store ? ['--store', store] : [])]));
   if (!root?.path || !root.source) throw new Error('OpenSpecのルートを解決できません。openspec list --jsonで設定を確認してください');
   const candidates = changes.filter(item => item.status !== 'complete' &&
@@ -30,7 +31,8 @@ export async function startChange(target, change, models = {}, base = dataRoot, 
   const id = randomUUID();
   const release = reserve(base, () => ({ id, paths: [target, root.path] }));
   try {
-    const state = create(target, `OpenSpec change: ${change ?? '次のchangeを選定して実行'}`, base, id);
+    const state = create(target, `OpenSpec change: ${change ?? '次のchangeを選定して実行'}`, base, id,
+      { kind: 'change', models: normalized, fallbacks });
     Object.assign(state, { kind: 'change', stage: 'prereview', change: change ?? null, candidates, models: normalized,
       openspec: { root: resolve(root.path), store: root.store_id ?? null, source: root.source } });
     save(state, base);

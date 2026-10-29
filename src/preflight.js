@@ -3,11 +3,11 @@ import { statSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
 import { resolveCodex, resolveExecutable, spawnCommand } from './commands.js';
-import { assignment, stagesFor } from './config.js';
+import { assignment, attemptAssignment, stagesFor } from './config.js';
 
 export async function checkGrantAccess(state, paths, check = checkCommand) {
   if (!paths.length) return;
-  const codex = assignment({ ...state, stage: 'execute' }).cli === 'codex';
+  const codex = (state.attemptAssignment ?? assignment({ ...state, stage: 'execute' })).cli === 'codex';
   const roots = [...(state.grants?.paths ?? []), ...paths, ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   for (const path of paths) {
     try {
@@ -91,7 +91,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
           '--', process.execPath, '-e', 'process.exit(0)'],
       ]),
     ];
-    if (stagesFor(state.kind).some(stage => assignment({ ...state, stage }).cli === 'claude')) {
+    if (state.attemptAssignment?.cli === 'claude' || stagesFor(state.kind).some(stage => assignment({ ...state, stage }).cli === 'claude')) {
       name = 'Claude実行ファイル';
       const claude = locateClaude();
       if (!claude) throw new Error('Claude CLIを導入してください');
@@ -103,6 +103,11 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       const output = await check(entry[1], entry[2], state.target);
       if (name === 'Claude認証' && typeof output === 'string' && !JSON.parse(output).loggedIn) throw new Error('Claudeが未認証');
       report.checks.push({ name, ok: true, ...(entry[2][0] === '--version' ? { path: entry[1], version: typeof output === 'string' ? output.trim() : null } : {}) });
+    }
+    if (state.attemptAssignment && state.stage === 'execute') {
+      name = `${attemptAssignment(state).cli}の追加パスアクセス`;
+      await checkGrantAccess({ ...state, executables: { ...state.executables, ...report.executables } }, state.grants?.paths ?? [], check);
+      report.checks.push({ name, ok: true });
     }
     report.ok = true;
   } catch (error) {

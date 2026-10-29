@@ -6,7 +6,7 @@ import { root, dataRoot, directory, save, event, advance, prompt } from './workf
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
-import { assignment, readConfig } from './config.js';
+import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
 import { resolveCodex, spawnCommand } from './commands.js';
 import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories } from './changes.js';
 import { rateLimits, insufficient, limitError } from './limits.js';
@@ -16,7 +16,7 @@ import { activity, eventStream } from './activity.js';
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
 
 export function resumeSession(state) {
-  const value = assignment(state);
+  const value = attemptAssignment(state);
   const session = state.session;
   const selected = evidenceSelection(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
   return session?.sessionId && JSON.stringify(session.externalEvidence ?? []) === JSON.stringify(selected) && session.stage === state.stage &&
@@ -26,7 +26,7 @@ export function resumeSession(state) {
 export const inputFor = state => resumeSession(state) ? state.answers.at(-1).answer : prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
 
 export function codexArgs(state, dir) {
-  const value = assignment(state);
+  const value = attemptAssignment(state);
   const session = resumeSession(state);
   const mode = ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
   const paths = [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
@@ -44,7 +44,7 @@ export function codexArgs(state, dir) {
 }
 
 export function claudeArgs(state, sessionId) {
-  const value = assignment(state);
+  const value = attemptAssignment(state);
   const session = resumeSession(state);
   const tools = ['Read', 'Glob', 'Grep'];
   if (state.stage === 'prereview') {
@@ -70,7 +70,7 @@ export function claudeArgs(state, sessionId) {
 }
 
 async function invokeAgent(state, dir, command, prefix = []) {
-  const value = assignment(state);
+  const value = attemptAssignment(state);
   command ??= value.cli === 'codex' ? state.executables?.codex ?? resolveCodex() : state.executables?.claude ?? 'claude';
   const sessionId = value.cli === 'claude' ? resumeSession(state)?.sessionId ?? randomUUID() : null;
   const input = inputFor(state);
@@ -169,7 +169,7 @@ export async function runAgent(state, dir, command, prefix = []) {
   let specBefore;
   if (['execute', 'prereview'].includes(state.stage)) {
     evidence = { attempt: state.attempts, before: join(dir, 'before.json'), after: join(dir, 'after.json'),
-      log: join(dir, assignment(state).cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl') };
+      log: join(dir, attemptAssignment(state).cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl') };
     before = await snapshot(state.target, evidence.before);
     if (separateOpenSpec(state)) {
       evidence.openspec = { ...openSpecRoot(state), before: join(dir, 'openspec-before.json'), after: join(dir, 'openspec-after.json') };
@@ -202,7 +202,7 @@ export const runCodex = runAgent;
 
 async function prepare(state, base, check) {
   const report = await check(state);
-  if (report.executables) state.executables = report.executables;
+  if (report.executables) state.executables = { ...state.executables, ...report.executables };
   const dir = directory(state.id, base);
   const path = join(dir, `preflight-${Date.now()}-${process.hrtime.bigint()}.json`);
   writeFileSync(path, JSON.stringify(report, null, 2));
@@ -219,33 +219,63 @@ async function prepare(state, base, check) {
 
 export async function step(state, runner = runCodex, base = dataRoot, check = preflight, limits = rateLimits, validate = validatePrereview) {
   if (state.status !== 'ready') throw new Error(`実行できない状態です: ${state.status}`);
+  delete state.attemptAssignment;
   if (!await prepare(state, base, check)) return state;
-  return executeStep(state, runner, base, limits, validate);
+  return executeStep(state, runner, base, limits, validate, check, new Set());
 }
 
-async function executeStep(state, runner, base, limits, validate) {
+async function executeStep(state, runner, base, limits, validate, check, checked) {
   if (['granularity', 'architecture'].includes(state.stage)) {
     event(state, 'stage_migrated', { from: state.stage, to: 'plan' }, base);
     state.stage = 'plan';
   }
-  const config = readConfig();
-  const value = assignment(state, config);
-  const beforeLimits = await limits(state, value);
-  state.rateLimits = beforeLimits;
+  let config;
+  delete state.attemptAssignment;
+  try { config = readConfig(); validateAssignments(state, config); }
+  catch (error) {
+    state.status = 'failed'; state.error = error.message;
+    event(state, 'failed', error.message, base); save(state, base); return state;
+  }
+  const normal = assignment(state, config);
+  const fallback = fallbackAssignment(state, config);
+  let value = normal;
+  let beforeLimits = await limits(state, normal);
+  const selection = { stage: state.stage, normal: { ...normal, rateLimits: beforeLimits }, fallback: fallback ? { ...fallback, rateLimits: null } : null,
+    reason: beforeLimits ? '通常側の利用枠が十分' : '通常側の利用枠が未取得', selected: normal };
   if (insufficient(beforeLimits, config.limits[state.stage])) {
+    const alternative = fallback ? await limits(state, fallback) : null;
+    if (fallback) selection.fallback.rateLimits = alternative;
+    if (fallback && (alternative?.primary || alternative?.secondary) && !insufficient(alternative, config.limits[state.stage])) {
+      value = fallback; beforeLimits = alternative;
+      selection.reason = '通常側の利用枠不足により代替を選択'; selection.selected = fallback;
+    } else {
+      selection.reason = !fallback ? '通常側の利用枠不足・代替未指定' : !alternative?.primary && !alternative?.secondary ? '通常側の利用枠不足・代替の利用枠が未取得' : '通常側・代替とも利用枠不足';
+      selection.selected = null;
+    }
+  }
+  state.selection = selection;
+  event(state, 'assignment_selected', selection, base);
+  state.rateLimits = beforeLimits;
+  if (!selection.selected) {
     state.status = 'limited';
-    state.error = '利用枠が固定値を下回っています。別モデルへの変更、またはリセット待ち後にretryしてください';
+    state.error = `${selection.reason}。別モデルへの変更、またはリセット待ち後にretryしてください`;
     delete state.session;
     event(state, 'limited', { ...value, rateLimits: beforeLimits }, base);
     save(state, base);
     return state;
+  }
+  state.attemptAssignment = value;
+  const checkKey = `${state.stage}:${value.cli}`;
+  if ((value === fallback || (state.stage === 'execute' && state.grants?.paths?.length)) && !checked.has(checkKey)) {
+    if (!await prepare(state, base, check)) { delete state.attemptAssignment; save(state, base); return state; }
+    checked.add(checkKey);
   }
   state.inputAt = new Date().toISOString();
   if (!resumeSession(state)) delete state.session;
   const resumed = Boolean(resumeSession(state));
   const metric = { attempt: state.attempts + 1, stage: state.stage, ...value, resumed,
     sessionId: state.session?.sessionId ?? null, beforeLimits, startedAt: state.inputAt,
-    externalEvidence: evidenceSelection(state, Date.parse(state.inputAt)) };
+    selection, externalEvidence: evidenceSelection(state, Date.parse(state.inputAt)) };
   const started = performance.now();
   state.attempts += 1;
   const dir = join(directory(state.id, base), `attempt-${String(state.attempts).padStart(4, '0')}`);
@@ -309,6 +339,7 @@ async function executeStep(state, runner, base, limits, validate) {
     state.metrics.push(metric);
     writeFileSync(join(dir, 'metrics.json'), JSON.stringify(metric, null, 2));
     writeFileSync(join(directory(state.id, base), 'performance.json'), JSON.stringify(performanceReport(state), null, 2));
+    delete state.attemptAssignment;
     save(state, base);
   }
   if (resumed && metric.status === 'failed') {
@@ -316,16 +347,18 @@ async function executeStep(state, runner, base, limits, validate) {
     state.status = 'ready';
     delete state.error;
     save(state, base);
-    return executeStep(state, runner, base, limits, validate);
+    return executeStep(state, runner, base, limits, validate, check, checked);
   }
   return state;
 }
 
 export async function run(state, runner = runCodex, base = dataRoot, onProgress = () => {}, check = preflight, limits = rateLimits, validate = validatePrereview) {
   if (state.status !== 'ready') return state;
+  delete state.attemptAssignment;
   if (!await prepare(state, base, check)) { onProgress(state); return state; }
+  const checked = new Set();
   while (state.status === 'ready') {
-    await executeStep(state, runner, base, limits, validate);
+    await executeStep(state, runner, base, limits, validate, check, checked);
     onProgress(state);
   }
   return state;

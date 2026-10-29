@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, ex
 import { resolve, join, dirname, relative, parse, sep, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { validateModel, stagesFor, readConfig } from './config.js';
+import { validateModel, validateAssignments, stagesFor, readConfig } from './config.js';
 import { readEvidence, currentEvidence, evidenceInput } from './external-evidence.js';
 import { artifactCase } from './dashboard-artifact.js';
 import { publishStatus, requestPublish } from './publish.js';
@@ -153,6 +153,7 @@ export function summary(state, base = dataRoot) {
     limited: '別モデルへの変更、または利用枠のリセット待ち後にretryが必要です',
   }[state.status];
   const result = {
+    selection: state.selection ?? null,
     work: state.work ?? null, activity: state.activity ?? null,
     activityLabel: state.activity ? (state.activity.kind === 'report' ? '報告' : 'ツール観測') : '報告未取得',
     history: attemptHistory(state, base),
@@ -199,6 +200,7 @@ export function attemptHistory(state, base = dataRoot) {
     const result = read(join(path, 'result.json'));
     return { attempt: Number(name.slice(8)), stage: invocation?.work?.stage ?? metric?.stage ?? null,
       work: invocation?.work ?? null, cli: invocation?.cli ?? metric?.cli ?? null, model: invocation?.model ?? metric?.model ?? null,
+      effort: invocation?.effort ?? metric?.effort ?? null,
       status: metric?.status ?? '未記録', outcome: metric?.outcome ?? null, error: metric?.error ?? null, finishedAt: metric?.finishedAt ?? null,
       activity: invocation?.activity ?? null, report: result?.report ?? null, summary: result?.summary ?? null,
       result: join(path, 'result.json'), invocation: join(path, 'invocation.json'), metrics: join(path, 'metrics.json'),
@@ -236,9 +238,10 @@ function dashboardLocked(base, { config, launch, at } = {}) {
       lines.push('', '<details>', `<summary>${cell(view.name)}の詳細</summary>`, '', `ID: ${cell(state.id)}`, '', `開発対象: ${cell(state.target)}`);
       lines.push('', `現在の試行: ${cell(view.work ? JSON.stringify(view.work) : '未記録')}`,
         '', `${cell(activityText(view))} / 活動時刻: ${cell(view.activity?.at ?? '未記録')}`);
+      if (view.selection) lines.push('', `担当選択: ${cell(JSON.stringify(view.selection))}`);
       if (view.latestReport) lines.push('', `直近の工程報告（試行${view.latestReport.attempt}）: ${cell(JSON.stringify(view.latestReport.report))}`);
       for (const entry of view.history) {
-        lines.push('', `試行${entry.attempt}: ${cell(entry.stage ?? '未記録')} / ${cell(entry.cli ?? '未記録')} / ${cell(entry.model ?? '未記録')} / ${cell(entry.outcome ?? entry.status)} / 対象: ${cell(entry.work?.scope ?? '未記録')}`,
+        lines.push('', `試行${entry.attempt}: ${cell(entry.stage ?? '未記録')} / ${cell(entry.cli ?? '未記録')} / ${cell(entry.model ?? '未記録')} / ${cell(entry.effort ?? '未記録')} / ${cell(entry.outcome ?? entry.status)} / 対象: ${cell(entry.work?.scope ?? '未記録')}`,
           '', `報告: ${cell(entry.report ? JSON.stringify(entry.report) : `未記録${entry.summary ? ` / ${entry.summary}` : ''}`)}`,
           '', `[工程結果](${url(entry.result)}) · [担当・活動](${url(entry.invocation)}) · [成否・計測](${url(entry.metrics)}) · [元ログ](${url(entry.log)})`);
         if (entry.error) lines.push('', `失敗: ${cell(entry.error)}`);
@@ -275,12 +278,13 @@ export function event(state, type, detail, base = dataRoot) {
   appendFileSync(join(directory(state.id, base), 'events.jsonl'), JSON.stringify({ time: now(), type, detail }) + '\n');
 }
 
-export function create(target, requirement, base = dataRoot, id = randomUUID()) {
+export function create(target, requirement, base = dataRoot, id = randomUUID(), options = {}) {
   target = realpathSync(resolve(target));
   if (!statSync(target).isDirectory()) throw new Error('開発対象はディレクトリを指定してください');
   if (!requirement.trim()) throw new Error('要求が空です');
   const state = { id, target, requirement, createdAt: now(), updatedAt: now(),
-    kind: 'request', models: {}, status: 'ready', stage: 'plan', tasks: [], answers: [], lastResult: '', question: '', revisions: 0, attempts: 0 };
+    kind: 'request', models: {}, ...options, status: 'ready', stage: options.kind === 'change' ? 'prereview' : 'plan', tasks: [], answers: [], lastResult: '', question: '', revisions: 0, attempts: 0 };
+  validateAssignments(state);
   save(state, base);
   event(state, 'created', target, base);
   return state;
@@ -360,6 +364,7 @@ export const validChangeName = name => typeof name === 'string' && /^[a-z0-9]+(?
 export function setModel(state, stage, model, effort, base = dataRoot) {
   if (!stagesFor(state.kind).includes(stage)) throw new Error('工程が不正です');
   const value = validateModel({ model, effort });
+  validateAssignments({ ...state, models: { ...state.models, [stage]: value } });
   state.models ??= {};
   state.models[stage] = value;
   if (stage === state.stage) {
@@ -367,6 +372,16 @@ export function setModel(state, stage, model, effort, base = dataRoot) {
     if (state.status === 'limited') state.status = 'ready';
   }
   event(state, 'model_changed', { stage, ...value }, base);
+  save(state, base);
+}
+
+export function setFallback(state, stage, model, effort, base = dataRoot) {
+  if (!['ready', 'waiting', 'failed', 'limited', 'blocked'].includes(state.status)) throw new Error('停止中の案件だけ代替を変更できます');
+  const value = model === null ? null : validateModel({ model, effort });
+  const fallbacks = { ...state.fallbacks, [stage]: value };
+  validateAssignments({ ...state, fallbacks });
+  state.fallbacks = fallbacks;
+  event(state, 'fallback_changed', { stage, value }, base);
   save(state, base);
 }
 

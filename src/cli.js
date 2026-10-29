@@ -2,16 +2,18 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { reserve } from './locking.js';
 import { resolve } from 'node:path';
-import { create, load, answer, approve, grant, dataRoot, list, summary, setModel, retry, registerEvidence, dashboard } from './workflow.js';
+import { create, load, answer, approve, grant, dataRoot, list, summary, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
 import { step, run } from './executor.js';
 import { startChange, archive } from './changes.js';
 
 const [command, ...args] = process.argv.slice(2);
 const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   工程: 計画（要求・粒度・設計）→ 実装 → 独立レビュー → 最終確認
-  start <対象ディレクトリ> <要求ファイル>
-  start-change <対象> [change名] [--store <id>] [--model <工程> <モデル> [推論レベル]]...
+  start <対象ディレクトリ> <要求ファイル> [--model <工程> <モデル> [推論レベル]]... [--fallback <工程> <モデル> [推論レベル]]...
+  start-change <対象> [change名] [--store <id>] [--model <工程> <モデル> [推論レベル]]... [--fallback <工程> <モデル> [推論レベル]]...
   model <ID> <工程> <モデル> [推論レベル]
+  fallback <ID> <工程> <モデル> [推論レベル]
+  fallback <ID> <工程> --disable
   archive <ID>                 completedのchangeを同期・アーカイブ
   step <ID>                     次の1工程を実行
   run <ID>                      回答待ち・失敗・完了まで工程を進める
@@ -28,38 +30,42 @@ try {
   if (!command || command === '--help') {
     console.log(help);
   } else {
-    if (!['start', 'start-change', 'model', 'archive', 'step', 'run', 'answer', 'approve', 'grant', 'retry', 'status', 'evidence'].includes(command)) throw new Error(help);
-    const counts = { start: 2, step: 1, run: 1, answer: 2, retry: 1, archive: 1, evidence: 2 };
+    if (!['start', 'start-change', 'model', 'fallback', 'archive', 'step', 'run', 'answer', 'approve', 'grant', 'retry', 'status', 'evidence'].includes(command)) throw new Error(help);
+    const counts = { step: 1, run: 1, answer: 2, retry: 1, archive: 1, evidence: 2 };
     if ((counts[command] && args.length !== counts[command]) || (command === 'status' && args.length > 1) ||
       (command === 'model' && ![3, 4].includes(args.length)) ||
+      (command === 'fallback' && (![3, 4].includes(args.length) || (args[2] === '--disable' && args.length !== 3))) ||
       (command === 'approve' && ![1, 2].includes(args.length))) throw new Error(help);
     if (command === 'status') dashboard();
     let state;
-    if (command === 'start') {
-      const id = randomUUID();
-      release = reserve(dataRoot, () => ({ id, paths: [args[0]] }));
-      state = create(args[0], readFileSync(resolve(args[1]), 'utf8'), dataRoot, id);
-    }
-    else if (command === 'start-change') {
+    if (['start', 'start-change'].includes(command)) {
       const target = args.shift();
       if (!target) throw new Error(help);
-      const change = args[0] && !args[0].startsWith('--') ? args.shift() : undefined;
+      const request = command === 'start' ? args.shift() : undefined;
+      if (command === 'start' && (!request || request.startsWith('--'))) throw new Error(help);
+      const change = command === 'start-change' && args[0] && !args[0].startsWith('--') ? args.shift() : undefined;
       const models = {};
+      const fallbacks = {};
       let store;
       while (args.length) {
         const option = args.shift();
-        if (option === '--store') {
+        if (option === '--store' && command === 'start-change') {
           if (store || !args[0] || args[0].startsWith('--')) throw new Error(help);
           store = args.shift();
           continue;
         }
-        if (option !== '--model' || args.length < 2) throw new Error(help);
+        if (!['--model', '--fallback'].includes(option) || args.length < 2) throw new Error(help);
         const stage = args.shift();
         const model = args.shift();
         const effort = args[0] && !args[0].startsWith('--') ? args.shift() : undefined;
-        models[stage] = { model, effort };
+        (option === '--model' ? models : fallbacks)[stage] = { model, effort };
       }
-      state = await startChange(resolve(target), change, models, undefined, undefined, store);
+      if (command === 'start-change') state = await startChange(resolve(target), change, models, undefined, undefined, store, fallbacks);
+      else {
+        const id = randomUUID();
+        release = reserve(dataRoot, () => ({ id, paths: [target] }));
+        state = create(target, readFileSync(resolve(request), 'utf8'), dataRoot, id, { models, fallbacks });
+      }
     }
     else if (command === 'status' && !args.length) console.log(JSON.stringify(list().map(state => summary(state)), null, 2));
     else {
@@ -91,6 +97,7 @@ try {
       else if (command === 'retry') retry(state);
       else if (command === 'evidence') registerEvidence(state, args[1]);
       else if (command === 'model') setModel(state, args[1], args[2], args[3]);
+      else if (command === 'fallback') setFallback(state, args[1], args[2] === '--disable' ? null : args[2], args[3]);
       else if (command === 'archive') console.log(await archive(state));
     }
     if (state) console.log(JSON.stringify(summary(state), null, 2));
