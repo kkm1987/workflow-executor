@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { root, create, save, dashboard } from '../src/workflow.js';
 import { readConfig } from '../src/config.js';
-import { renderArtifact } from '../src/dashboard-artifact.js';
+import { artifactCase, renderArtifact } from '../src/dashboard-artifact.js';
 import { runPublisher, shouldPublish, snapshotHash, requestPublish } from '../src/publish.js';
 
 const config = { url: 'https://claude.ai/artifact/test-page', model: 'claude-haiku-5-5', intervalSeconds: 300, timeoutSeconds: 2 };
@@ -20,6 +20,19 @@ function fixture(t) {
 const snapshot = base => JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'));
 const record = base => JSON.parse(readFileSync(join(base, 'dashboard-publish.json'), 'utf8'));
 const fake = (mode, base) => ({ command: process.execPath, prefix: [join(root, 'test', 'fixtures', 'publisher.mjs'), mode, base] });
+
+test('案件名は50文字を保持し、100文字は80文字と省略記号にする', () => {
+  for (const length of [50, 100]) {
+    const name = '案'.repeat(length);
+    assert.equal(artifactCase({ name }, {}).name, length === 50 ? name : '案'.repeat(80) + '…');
+  }
+});
+
+test('閲覧ページは案件一覧の前に分類別件数欄を含む', () => {
+  const html = renderArtifact({ generatedAt: null, counts: {}, groups: [] });
+  assert.match(html, /<ul id="counts" aria-label="分類別件数"><\/ul>/);
+  assert.ok(html.indexOf('id="counts"') < html.indexOf('id="groups"'));
+});
 
 test('要約は分類・順序・対応をMarkdownと共有し、保存済み状態から決定的に生成する', t => {
   const { state, base, target } = fixture(t);
@@ -69,6 +82,31 @@ test('Artifact設定は既定値を補い、不正URL・モデル・間隔・打
   assert.equal(read({}).dashboardArtifact.url, undefined);
   for (const value of [null, [], 'x', { url: 'http://claude.ai/artifact/a' }, { url: 'https://evil.example/artifact/a' }, { url: config.url + '?token=secret' },
     { model: 'gpt-6' }, { model: 'claude-x;bad' }, { intervalSeconds: 0 }, { intervalSeconds: -1 }, { timeoutSeconds: 1.5 }, { timeoutSeconds: '120' }]) assert.throws(() => read(value));
+});
+
+test('ローカル公開設定は共有設定を置き換え、既定値を補い、不正な設定を拒否する', t => {
+  const { dir } = fixture(t);
+  const path = join(dir, 'config.json');
+  const localPath = join(dir, 'workflow.config.local.json');
+  const shared = { ...readConfig(), dashboardArtifact: { ...config, model: 'claude-shared', intervalSeconds: 999 } };
+  writeFileSync(path, JSON.stringify(shared));
+  assert.deepEqual(readConfig(path).dashboardArtifact, shared.dashboardArtifact);
+  const read = value => { writeFileSync(localPath, JSON.stringify(value)); return readConfig(path); };
+  assert.deepEqual(read({ dashboardArtifact: { url: 'https://claude.ai/artifact/local' } }).dashboardArtifact,
+    { url: 'https://claude.ai/artifact/local', model: 'claude-haiku-5-5', intervalSeconds: 300, timeoutSeconds: 120 });
+  assert.equal(read({ dashboardArtifact: {} }).dashboardArtifact.url, undefined);
+  assert.deepEqual(read({}).dashboardArtifact, shared.dashboardArtifact);
+  for (const value of [null, [], 'x', { models: {} }, { dashboardArtifact: {}, limits: {} }]) {
+    assert.throws(() => read(value), /workflow\.config\.local\.json/);
+  }
+  for (const value of [null, { url: 'https://evil.example/artifact/a' }, { model: 'gpt-6' }, { intervalSeconds: 0 }, { timeoutSeconds: -1 }]) {
+    assert.throws(() => read({ dashboardArtifact: value }), /dashboardArtifact/);
+  }
+  writeFileSync(localPath, '{');
+  assert.throws(() => readConfig(path), /workflow\.config\.local\.json/);
+  rmSync(localPath);
+  mkdirSync(localPath);
+  assert.throws(() => readConfig(path), /workflow\.config\.local\.json/);
 });
 
 test('起動判定は内容不変を抑止し、遷移・工程・案件増減を即時、それ以外を間引く', t => {

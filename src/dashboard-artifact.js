@@ -16,7 +16,7 @@ export function artifactCase(view, state) {
     const chars = Array.from(result.trim());
     return chars.slice(0, limit).join('') + (chars.length > limit ? '…' : '');
   };
-  const result = { id: view.id, name: text(view.name, 32), status: view.status, statusLabel: view.statusLabel,
+  const result = { id: view.id, name: text(view.name, 80), status: view.status, statusLabel: view.statusLabel,
     stage: view.stage, stageLabel: view.stageLabel, completed: view.completed, total: view.total,
     owner: view.owner, nextAction: view.nextAction, updatedAt: view.updatedAt,
     activity: view.activity?.kind === 'report' ? text(view.activity.text) : view.activity ? 'ツールの実行状況を更新' : '報告未取得',

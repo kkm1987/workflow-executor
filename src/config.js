@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const stagesFor = kind => kind === 'change'
   ? ['prereview', 'execute', 'review', 'acceptance'] : ['plan', 'execute', 'review', 'acceptance'];
@@ -16,6 +18,19 @@ export function validateModel(value) {
 
 export function readConfig(path = new URL('../workflow.config.json', import.meta.url)) {
   const config = JSON.parse(readFileSync(path, 'utf8'));
+  const localPath = join(dirname(path instanceof URL ? fileURLToPath(path) : path), 'workflow.config.local.json');
+  let local;
+  try {
+    local = JSON.parse(readFileSync(localPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`${localPath}: ${error.message}`, { cause: error });
+  }
+  if (local !== undefined) {
+    if (!local || typeof local !== 'object' || Array.isArray(local) || Object.keys(local).some(key => key !== 'dashboardArtifact')) {
+      throw new Error(`${localPath}: dashboardArtifactだけを指定してください`);
+    }
+    if (Object.hasOwn(local, 'dashboardArtifact')) config.dashboardArtifact = local.dashboardArtifact;
+  }
   for (const kind of ['request', 'change']) {
     for (const stage of stagesFor(kind)) validateModel(config.models?.[kind]?.[stage]);
   }

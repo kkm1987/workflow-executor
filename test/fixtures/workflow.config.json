@@ -1,0 +1,16 @@
+{
+  "models": {
+    "request": { "plan": {}, "execute": {}, "review": {}, "acceptance": {} },
+    "change": {
+      "prereview": { "model": "claude-opus-5-5", "effort": "medium" },
+      "execute": {}, "review": {}, "acceptance": {}
+    }
+  },
+  "limits": {
+    "plan": { "primary": 20, "secondary": 10 },
+    "prereview": { "primary": 20, "secondary": 10 },
+    "execute": { "primary": 20, "secondary": 10 },
+    "review": { "primary": 10, "secondary": 5 },
+    "acceptance": { "primary": 10, "secondary": 5 }
+  }
+}

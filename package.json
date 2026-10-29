@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/test.mjs",
     "test:e2e": "node scripts/verify-e2e.mjs",
     "workflow": "node src/cli.js"
   },

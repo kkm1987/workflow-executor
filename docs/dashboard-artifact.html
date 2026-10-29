@@ -10,12 +10,16 @@
   h3 { font-size: 1.1rem; margin: 6px 0; } p { margin: 8px 0; white-space: pre-wrap; }
   summary { cursor: pointer; padding: 8px 0; } dl { margin: 8px 0; } dt { font-weight: 650; margin-top: 12px; } dd { margin: 4px 0 0; white-space: pre-wrap; }
   .id { font: .75rem/1.5 monospace; color: #52665f; }
+  #counts { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 0; list-style: none; }
+  #counts .attention { border: 0; color: #81500c; font-weight: 700; }
+  .compact > summary { padding: 0; }
 </style>
 <main>
   <h1>ワークフローの状況</h1>
   <div class="muted" id="updated">更新時刻: なし</div>
   <p class="muted">閲覧専用です。回答・再開は開発主体とのチャットで行ってください。</p>
   <p id="message" role="status">要約はまだ公開されていません。</p>
+  <ul id="counts" aria-label="分類別件数"></ul>
   <div id="groups"></div>
 </main>
 <script id="dashboard-data" type="application/json">{"generatedAt":null,"counts":{},"groups":[]}</script>
@@ -35,13 +39,24 @@
       document.getElementById('message').textContent = data.generatedAt
         ? (data.groups.length ? `全${Object.values(data.counts).reduce((sum, n) => sum + n, 0)}件` : '案件はありません。')
         : '要約はまだ公開されていません。';
+      for (const [label, keys, attention] of [
+        ['回答待ち', ['waiting'], true], ['利用枠不足', ['limited'], true],
+        ['失敗', ['failed'], true], ['差し戻し', ['blocked'], true],
+        ['完了', ['completed'], false], ['進行中', ['ready', 'running'], false]
+      ]) {
+        const count = keys.reduce((sum, key) => sum + (data.counts[key] ?? 0), 0);
+        const needsAction = attention && count > 0;
+        document.getElementById('counts').append(element('li', `${label}: ${count}件${needsAction ? '（要対応）' : ''}`, needsAction ? 'attention' : ''));
+      }
       for (const group of data.groups) {
         const section = element('section');
         section.append(element('h2', `${group.label} · ${group.cases.length}`));
         for (const item of group.cases) {
-          const card = element('article', '', ['waiting', 'limited', 'failed', 'blocked'].includes(item.status) ? 'card attention' : 'card');
-          card.append(element('div', `${item.statusLabel} / ${item.stageLabel} / ${item.completed}/${item.total} 完了`, 'badge'),
-            element('h3', item.name), element('p', `${item.owner}: ${item.nextAction}`),
+          const attention = ['waiting', 'limited', 'failed', 'blocked'].includes(item.status);
+          const card = element(attention ? 'article' : 'details', '', attention ? 'card attention' : 'card compact');
+          if (attention) card.append(element('div', `${item.statusLabel} / ${item.stageLabel} / ${item.completed}/${item.total} 完了`, 'badge'), element('h3', item.name));
+          else card.append(element('summary', `${item.statusLabel} · ${item.name} · 工程 ${item.completed}/${item.total} · 活動: ${time(item.activityAt)}`));
+          card.append(element('p', `${item.owner}: ${item.nextAction}`),
             element('p', item.question || item.reason || item.result || ''),
             element('p', item.activity), element('div', `活動: ${time(item.activityAt)}`, 'muted'));
           const details = element('details');

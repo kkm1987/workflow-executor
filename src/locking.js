@@ -48,7 +48,18 @@ export function withSharedLock(base, action) {
 
 export function atomicWrite(path, text) {
   const temporary = `${path}.${randomUUID()}.new`;
-  try { writeFileSync(temporary, text); renameSync(temporary, path); }
+  try {
+    writeFileSync(temporary, text);
+    const deadline = performance.now() + 1000;
+    while (true) {
+      try { renameSync(temporary, path); break; }
+      catch (error) {
+        // Windowsで一時的に保持された置換先は、元ファイルを残したまま再試行する。
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || performance.now() >= deadline) throw error;
+        Atomics.wait(pause, 0, 0, 20);
+      }
+    }
+  }
   finally { if (existsSync(temporary)) unlinkSync(temporary); }
 }
 
