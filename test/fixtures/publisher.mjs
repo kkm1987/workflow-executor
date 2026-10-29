@@ -23,9 +23,10 @@ if (mode === 'change-fail') {
 if (mode === 'fail') process.exit(2);
 if (mode === 'mutate') writeFileSync(file, '変更されたHTML');
 if (mode === 'timeout') await new Promise(() => { setInterval(() => {}, 1000); });
-if (mode === 'hold') {
+if (mode === 'hold' || mode === 'hold-fail') {
   writeFileSync(join(base, 'fake-started'), 'ready');
   while (!existsSync(join(base, 'fake-release'))) await new Promise(resolve => setTimeout(resolve, 20));
+  if (mode === 'hold-fail') process.exit(2);
 }
 if (mode === 'change' && count === 1) {
   const path = join(base, 'dashboard.json');

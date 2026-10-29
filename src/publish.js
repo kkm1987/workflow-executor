@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, renameSync, mkdirSync, mkdtempSync, rmSync, openSync, closeSync, unlinkSync, statSync, utimesSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, openSync, closeSync, unlinkSync, statSync, utimesSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.js';
 import { spawnCommand } from './commands.js';
 import { eventStream } from './activity.js';
 import { renderArtifact } from './dashboard-artifact.js';
+import { withSharedLock, atomicWrite } from './locking.js';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 const timestamp = () => new Date().toISOString();
@@ -16,12 +17,8 @@ const readRecord = base => {
   try { return JSON.parse(readFileSync(join(base, 'dashboard-publish.json'), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
 };
-const atomicWrite = (path, text) => {
-  const temporary = `${path}.${randomUUID()}.new`;
-  try { writeFileSync(temporary, text); renameSync(temporary, path); }
-  finally { try { unlinkSync(temporary); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
-};
-const record = (base, changes) => atomicWrite(join(base, 'dashboard-publish.json'), JSON.stringify({ ...readRecord(base), ...changes }, null, 2));
+const recordLocked = (base, changes) => atomicWrite(join(base, 'dashboard-publish.json'), JSON.stringify({ ...readRecord(base), ...changes }, null, 2));
+const record = (base, changes) => withSharedLock(base, () => recordLocked(base, changes));
 
 export function publishStatus(base) {
   const value = readRecord(base);
@@ -48,8 +45,14 @@ export function startPublisher(base, config) {
 }
 
 export function requestPublish(snapshot, base, config, launch = startPublisher, at = Date.now()) {
-  if (!shouldPublish(snapshot, readRecord(base), config, at)) return false;
-  record(base, { startedAt: new Date(at).toISOString() });
+  const requested = withSharedLock(base, () => {
+    try { snapshot = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!shouldPublish(snapshot, readRecord(base), config, at)) return false;
+    recordLocked(base, { startedAt: new Date(at).toISOString() });
+    return true;
+  });
+  if (!requested) return false;
   try { launch(base, config); }
   catch { record(base, { failedAt: timestamp(), failureReason: '公開プロセスを起動できませんでした' }); }
   return true;
@@ -146,15 +149,19 @@ export async function runPublisher(base, config, { command = 'claude', prefix = 
     mkdirSync(join(project, 'agent-docs'), { recursive: true });
     temporary = mkdtempSync(join(project, 'agent-docs', 'dashboard-publish-'));
     for (let pass = 0; pass < 3; pass++) {
-      const snapshot = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'));
-      const hash = snapshotHash(snapshot);
-      const previous = readRecord(base);
-      if (hash === previous.hash && config.url === previous.url) break;
-      if (!ownsLock()) break;
+      const prepared = withSharedLock(base, () => {
+        const snapshot = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'));
+        const hash = snapshotHash(snapshot);
+        const previous = readRecord(base);
+        if ((hash === previous.hash && config.url === previous.url) || !ownsLock()) return;
+        recordLocked(base, { startedAt: timestamp() });
+        return { snapshot, hash };
+      });
+      if (!prepared) break;
+      const { snapshot, hash } = prepared;
       attemptedHash = hash;
       const file = join(temporary, 'dashboard.html');
       writeFileSync(file, renderArtifact(snapshot));
-      record(base, { startedAt: timestamp() });
       await publishFile(file, config, command, prefix);
       record(base, { succeededAt: timestamp(), url: config.url, hash, cases: cases(snapshot) });
       success = true;
@@ -170,9 +177,11 @@ export async function runPublisher(base, config, { command = 'claude', prefix = 
     if (temporary) rmSync(temporary, { recursive: true, force: true });
     if (ownsLock()) unlinkSync(lock);
     try {
-      const markdown = join(base, 'dashboard.md');
-      const current = readFileSync(markdown, 'utf8');
-      atomicWrite(markdown, `${current.replace(/^公開状況:.*\r?\n?/gm, '').trimEnd()}\n\n${publishStatus(base)}\n`);
+      withSharedLock(base, () => {
+        const markdown = join(base, 'dashboard.md');
+        const current = readFileSync(markdown, 'utf8');
+        atomicWrite(markdown, `${current.replace(/^公開状況:.*\r?\n?/gm, '').trimEnd()}\n\n${publishStatus(base)}\n`);
+      });
     } catch {}
   }
   // 終了直前の保存がロックで起動を見送った場合も、解放後に拾う。

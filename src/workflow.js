@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, readdirSync, existsSync, openSync, closeSync, unlinkSync, realpathSync, statSync } from 'node:fs';
+import { withSharedLock, atomicWrite } from './locking.js';
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, openSync, closeSync, unlinkSync, realpathSync, statSync } from 'node:fs';
 import { resolve, join, dirname, relative, parse, sep, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -116,13 +117,15 @@ export function directory(id, base = dataRoot) {
 }
 
 export function save(state, base = dataRoot) {
-  const dir = directory(state.id, base);
-  mkdirSync(dir, { recursive: true });
-  state.updatedAt = now();
-  const path = join(dir, 'state.json');
-  writeFileSync(`${path}.new`, JSON.stringify(state, null, 2));
-  renameSync(`${path}.new`, path);
-  dashboard(base);
+  const publish = withSharedLock(base, () => {
+    const dir = directory(state.id, base);
+    mkdirSync(dir, { recursive: true });
+    state.updatedAt = now();
+    const path = join(dir, 'state.json');
+    atomicWrite(path, JSON.stringify(state, null, 2));
+    return dashboardLocked(base);
+  });
+  try { publish?.(); } catch {}
 }
 
 export function load(id, base = dataRoot) {
@@ -203,7 +206,13 @@ export function attemptHistory(state, base = dataRoot) {
   });
 }
 
-export function dashboard(base = dataRoot, { config, launch, at } = {}) {
+export function dashboard(base = dataRoot, options = {}) {
+  const publish = withSharedLock(base, () => dashboardLocked(base, options));
+  try { publish?.(); } catch {}
+}
+
+function dashboardLocked(base, { config, launch, at } = {}) {
+  let publish;
   mkdirSync(base, { recursive: true });
   const states = list(base);
   const cell = value => String(value ?? '').replace(/[\r\n]/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/([\\|`*_[\]])/g, '\\$1');
@@ -248,14 +257,12 @@ export function dashboard(base = dataRoot, { config, launch, at } = {}) {
   // 公開の設定・記録・起動の失敗は、状態保存の成否に影響させない。
   try {
     const path = join(base, 'dashboard.json');
-    const temporary = `${path}.${randomUUID()}.new`;
-    try { writeFileSync(temporary, JSON.stringify(snapshot)); renameSync(temporary, path); }
-    finally { if (existsSync(temporary)) unlinkSync(temporary); }
+    atomicWrite(path, JSON.stringify(snapshot));
     const publishing = (config ?? readConfig()).dashboardArtifact;
-    if (publishing?.url) { requestPublish(snapshot, base, publishing, launch, at); lines.push('', publishStatus(base)); }
+    if (publishing?.url) { publish = () => requestPublish(snapshot, base, publishing, launch, at); lines.push('', publishStatus(base)); }
   } catch {}
-  writeFileSync(join(base, 'dashboard.md.new'), `${lines.join('\n')}\n`);
-  renameSync(join(base, 'dashboard.md.new'), join(base, 'dashboard.md'));
+  atomicWrite(join(base, 'dashboard.md'), `${lines.join('\n')}\n`);
+  return publish;
 }
 
 function activityText(view) {
@@ -268,11 +275,11 @@ export function event(state, type, detail, base = dataRoot) {
   appendFileSync(join(directory(state.id, base), 'events.jsonl'), JSON.stringify({ time: now(), type, detail }) + '\n');
 }
 
-export function create(target, requirement, base = dataRoot) {
+export function create(target, requirement, base = dataRoot, id = randomUUID()) {
   target = realpathSync(resolve(target));
   if (!statSync(target).isDirectory()) throw new Error('開発対象はディレクトリを指定してください');
   if (!requirement.trim()) throw new Error('要求が空です');
-  const state = { id: randomUUID(), target, requirement, createdAt: now(), updatedAt: now(),
+  const state = { id, target, requirement, createdAt: now(), updatedAt: now(),
     kind: 'request', models: {}, status: 'ready', stage: 'plan', tasks: [], answers: [], lastResult: '', question: '', revisions: 0, attempts: 0 };
   save(state, base);
   event(state, 'created', target, base);

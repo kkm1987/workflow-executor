@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { reserve } from './locking.js';
 import { resolve } from 'node:path';
-import { create, load, answer, approve, grant, lock, list, summary, setModel, retry, registerEvidence, dashboard } from './workflow.js';
+import { create, load, answer, approve, grant, dataRoot, list, summary, setModel, retry, registerEvidence, dashboard } from './workflow.js';
 import { step, run } from './executor.js';
 import { startChange, archive } from './changes.js';
 
@@ -31,11 +33,13 @@ try {
     if ((counts[command] && args.length !== counts[command]) || (command === 'status' && args.length > 1) ||
       (command === 'model' && ![3, 4].includes(args.length)) ||
       (command === 'approve' && ![1, 2].includes(args.length))) throw new Error(help);
-    // Serialize state mutations and Codex runs; never allow two writers to a target.
-    if (command !== 'status') release = lock();
     if (command === 'status') dashboard();
     let state;
-    if (command === 'start') state = create(args[0], readFileSync(resolve(args[1]), 'utf8'));
+    if (command === 'start') {
+      const id = randomUUID();
+      release = reserve(dataRoot, () => ({ id, paths: [args[0]] }));
+      state = create(args[0], readFileSync(resolve(args[1]), 'utf8'), dataRoot, id);
+    }
     else if (command === 'start-change') {
       const target = args.shift();
       if (!target) throw new Error(help);
@@ -59,6 +63,15 @@ try {
     }
     else if (command === 'status' && !args.length) console.log(JSON.stringify(list().map(state => summary(state)), null, 2));
     else {
+      if (command !== 'status') release = reserve(dataRoot, () => {
+        const current = load(args[0]);
+        const paths = [current.target, ...(current.grants?.paths ?? [])];
+        if (current.kind === 'change') paths.push(current.openspec?.root ?? current.target);
+        if (command === 'grant') for (let i = 1; i < args.length; i++) {
+          if (args[i] === '--path' && args[i + 1]) paths.push(args[++i]);
+        }
+        return { id: current.id, paths };
+      });
       state = load(args[0]);
       if (command === 'step') await step(state);
       else if (command === 'run') await run(state, undefined, undefined, current => {

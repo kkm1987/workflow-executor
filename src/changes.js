@@ -1,4 +1,6 @@
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { reserve } from './locking.js';
 import { resolve, join } from 'node:path';
 import { capture } from './commands.js';
 import { create, save, event, dataRoot, validChangeName } from './workflow.js';
@@ -25,11 +27,15 @@ export async function startChange(target, change, models = {}, base = dataRoot, 
     (item.totalTasks === 0 || item.completedTasks < item.totalTasks) && validChangeName(item.name));
   if (!candidates.length) throw new Error('未完了のchangeがありません');
   if (change && !candidates.some(item => item.name === change)) throw new Error('指定changeが未完了の候補にありません');
-  const state = create(target, `OpenSpec change: ${change ?? '次のchangeを選定して実行'}`, base);
-  Object.assign(state, { kind: 'change', stage: 'prereview', change: change ?? null, candidates, models: normalized,
-    openspec: { root: resolve(root.path), store: root.store_id ?? null, source: root.source } });
-  save(state, base);
-  return state;
+  const id = randomUUID();
+  const release = reserve(base, () => ({ id, paths: [target, root.path] }));
+  try {
+    const state = create(target, `OpenSpec change: ${change ?? '次のchangeを選定して実行'}`, base, id);
+    Object.assign(state, { kind: 'change', stage: 'prereview', change: change ?? null, candidates, models: normalized,
+      openspec: { root: resolve(root.path), store: root.store_id ?? null, source: root.source } });
+    save(state, base);
+    return state;
+  } finally { release(); }
 }
 
 export async function archive(state, base = dataRoot, execute = runOpenSpec) {
