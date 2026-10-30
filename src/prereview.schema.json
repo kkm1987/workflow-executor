@@ -15,6 +15,7 @@
         "additionalProperties": false
       }
     },
+    "returnTo": { "type": "string", "enum": ["execute", "prereview", "none"] },
     "outcome": { "type": "string", "enum": ["ok", "question", "error"] },
     "summary": { "type": "string" },
     "question": { "type": "string" },
@@ -50,6 +51,6 @@
       }
     }
   },
-  "required": ["outcome", "summary", "question", "change", "decisions", "tasks", "report", "approvals"],
+  "required": ["returnTo", "outcome", "summary", "question", "change", "decisions", "tasks", "report", "approvals"],
   "additionalProperties": false
 }

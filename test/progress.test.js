@@ -9,7 +9,7 @@ import { root, create, summary, save, validateResult, prompt, setModel, answer }
 import { step, runAgent } from '../src/executor.js';
 
 const report = { scope: 'sample.txt / 正常を含む', decisions: [], verification: '未検証', remaining: '読み取り確認' };
-const result = { outcome: 'ok', summary: '確認', question: '', tasks: [], report };
+const result = { returnTo: 'none', outcome: 'ok', summary: '確認', question: '', tasks: [], report };
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'progress-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -64,7 +64,7 @@ test('両スキーマと実装・レビュー・最終確認はreportを必須�
     assert.throws(() => validateResult({ ...result, report: undefined }, stage), /工程報告/);
     assert.throws(() => validateResult({ ...result, report: { ...report, scope: ' ' } }, stage), /工程報告/);
     assert.throws(() => validateResult({ ...result, report: { ...report, decisions: [''] } }, stage), /工程報告/);
-    if (stage !== 'execute') assert.equal(validateResult({ ...result, outcome: 'revise' }, stage).outcome, 'revise');
+    if (stage !== 'execute') assert.equal(validateResult({ ...result, outcome: 'revise', returnTo: stage === 'review' ? 'prereview' : 'none' }, stage).outcome, 'revise');
   }
 });
 

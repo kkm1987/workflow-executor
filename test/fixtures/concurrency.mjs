@@ -41,7 +41,7 @@ try {
         process.send({ type: 'stage', stage: state.stage });
         const response = await next();
         if (response.fail) throw new Error('試験例外');
-        return { outcome: 'ok', summary: '確認済み', question: '',
+        return { returnTo: 'none', outcome: 'ok', summary: '確認済み', question: '',
           report: { scope: '試験', decisions: [], verification: '合図確認', remaining: 'なし' },
           tasks: [{ title: '試験', acceptance: '合図' }],
           decisions: { requirements: '試験', granularity: '試験', architecture: '試験' } };

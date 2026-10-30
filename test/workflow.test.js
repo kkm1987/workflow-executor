@@ -29,8 +29,8 @@ function fixture(t) {
 }
 const task = { title: '入力検証', acceptance: '空の入力は保存されない' };
 const decisions = { requirements: '要求と受け入れ条件を確認', granularity: '独立検証できる最小単位', architecture: '既存の標準機能で実装' };
-const ok = (tasks = []) => ({ report, outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
-const revise = { report, outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
+const ok = (tasks = []) => ({ report, returnTo: 'none', outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
+const revise = { report, returnTo: 'prereview', outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
 
 const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合' }];
 const prereviewResult = (approvals = []) => ({ ...ok([task]), change: 'sample-change', approvals,
@@ -377,7 +377,7 @@ test('全工程が独立して進み、レビュー後だけタスクが完了�
 
 test('質問は同じ工程で停止し、回答を保存して新しい実行へ渡す', async t => {
   const { state, base } = fixture(t);
-  await step(state, async () => ({ report, outcome: 'question', summary: '保存先が不明', question: '保存先は？', tasks: [] }), base);
+  await step(state, async () => ({ report, returnTo: 'none', outcome: 'question', summary: '保存先が不明', question: '保存先は？', tasks: [] }), base);
   assert.equal(state.status, 'waiting');
   assert.equal(state.stage, 'plan');
   await assert.rejects(step(state, async () => ok([task]), base), /実行できない/);
@@ -405,7 +405,7 @@ test('手戻りが上限を超えると停止する', t => {
   const { state } = fixture(t);
   for (let i = 0; i < 4; i++) {
     state.stage = 'acceptance';
-    advance(state, revise);
+    advance(state, { ...revise, returnTo: 'none' });
   }
   assert.equal(state.status, 'blocked');
   assert.equal(state.revisions, 4);
@@ -415,7 +415,7 @@ test('実装の途中終了は正常系で、同じ工程の実行待ちに戻�
   const { state } = fixture(t);
   state.tasks = [{ ...task, status: 'pending' }];
   state.stage = 'execute';
-  const partial = { report, outcome: 'partial', summary: '半分完了', question: '', tasks: [] };
+  const partial = { report, returnTo: 'none', outcome: 'partial', summary: '半分完了', question: '', tasks: [] };
   advance(state, partial);
   assert.deepEqual([state.status, state.stage], ['ready', 'execute']);
   assert.throws(() => validateResult(partial, 'review'), /使えない/);
@@ -428,7 +428,7 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   state.tasks = [{ ...task, status: 'pending' }];
   state.stage = 'execute';
   const outside = join(root, 'agent-docs');
-  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
+  advance(state, { report, returnTo: 'none', outcome: 'permission', summary: '遮断', question: 'npm installに必要', permission: { network: true, paths: [outside] }, tasks: [] });
   assert.equal(state.status, 'waiting');
   assert.equal(summary(state, base).permission.network, true);
   await assert.rejects(grant(state, { paths: [homedir()] }, base, passed), /許可できない/);
@@ -436,14 +436,14 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   assert.equal(state.status, 'ready');
   assert.ok(codexArgs(state, base).includes('sandbox_workspace_write.network_access=true'));
   assert.ok(codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
-  assert.throws(() => validateResult({ report, outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
+  assert.throws(() => validateResult({ report, returnTo: 'none', outcome: 'permission', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
 });
 
 test('アクセス確認に失敗した許可は保存せず、修正後に同じパスで再開できる', async t => {
   const { state, base, target } = fixture(t);
   state.stage = 'execute';
   const permission = { network: true, paths: [target] };
-  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'アクセスが必要', permission, tasks: [] });
+  advance(state, { report, returnTo: 'none', outcome: 'permission', summary: '遮断', question: 'アクセスが必要', permission, tasks: [] });
   save(state, base);
   const before = structuredClone(state);
   let accessible = false;
@@ -491,7 +491,7 @@ test('許可の確認はCodexの実装用設定を使い、Claudeは直接読み
   await checkGrantAccess(state, [target], async () => { assert.fail('Claudeでは起動しない'); });
   await assert.rejects(checkGrantAccess(state, [join(target, 'missing')]), /OSのアクセス権/);
   state.stage = 'execute';
-  advance(state, { report, outcome: 'permission', summary: '遮断', question: 'ネットワークが必要', permission: { network: true, paths: [] }, tasks: [] });
+  advance(state, { report, returnTo: 'none', outcome: 'permission', summary: '遮断', question: 'ネットワークが必要', permission: { network: true, paths: [] }, tasks: [] });
   await grant(state, { network: true }, base, async () => { assert.fail('パスなしでは確認しない'); });
   assert.equal(state.status, 'ready');
 });
@@ -577,7 +577,7 @@ test('自動進行は質問で止まり、回答後は全工程を進めて完�
   let calls = 0;
   await run(state, async () => {
     calls++;
-    return { report, outcome: 'question', summary: '入力形式の確認', question: '入力形式は？', tasks: [] };
+    return { report, returnTo: 'none', outcome: 'question', summary: '入力形式の確認', question: '入力形式は？', tasks: [] };
   }, base);
   assert.equal(calls, 1);
   assert.equal(state.status, 'waiting');
@@ -607,7 +607,7 @@ test('自動進行は失敗・手戻り上限で止まり、再実行を繰り�
 
 test('エージェントが報告した環境エラーは質問待ちにせず失敗として保存する', async t => {
   const { state, base } = fixture(t);
-  await run(state, async () => ({ report, outcome: 'error', summary: 'サンドボックス初期化に失敗', question: '', tasks: [] }), base);
+  await run(state, async () => ({ report, returnTo: 'none', outcome: 'error', summary: 'サンドボックス初期化に失敗', question: '', tasks: [] }), base);
   const saved = load(state.id, base);
   assert.equal(saved.status, 'failed');
   assert.equal(saved.stage, 'plan');
@@ -689,3 +689,101 @@ test('実装が途中で失敗しても変更前後の記録と元のエラー�
   assert.ok(existsSync(state.evidence[0].after));
 });
 
+
+test('tasks.mdの完了状態によらずexecuteとreviewは同じtargetを使う', async t => {
+  const { state, base, target } = fixture(t);
+  state.kind = 'change';
+  state.stage = 'prereview';
+  advance(state, { ...prereviewResult(), tasks: [task, { title: '次', acceptance: '次の条件' }] });
+  const input = () => JSON.parse(prompt(state).split('\n').at(-1));
+  const expected = { index: 0, ...task };
+  assert.deepEqual(input().target, expected);
+  await step(state, async () => {
+    writeFileSync(join(target, 'tasks.md'), '- [x] 入力検証\n- [ ] 次\n');
+    return ok();
+  }, base);
+  assert.deepEqual(input().target, expected);
+  assert.equal(state.work.scope, task.title);
+  await step(state, async () => ok(), base);
+  assert.deepEqual(input().target, { index: 1, title: '次', acceptance: '次の条件' });
+  state.stage = 'acceptance';
+  assert.ok(!Object.hasOwn(input(), 'target'));
+});
+
+test('returnToはreviewのreviseだけが差し戻し先を指定できる', () => {
+  for (const file of ['result', 'prereview']) {
+    const schema = JSON.parse(readFileSync(join(root, `src/${file}.schema.json`), 'utf8'));
+    assert.ok(schema.required.includes('returnTo'));
+  }
+  for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
+    for (const outcome of ['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval']) {
+      const valid = stage === 'review' && outcome === 'revise' ? ['execute', 'prereview'] : ['none'];
+      for (const returnTo of [undefined, 'invalid', 'none', 'execute', 'prereview']) {
+        if (valid.includes(returnTo)) continue;
+        const result = { ...ok([task]), outcome, returnTo, question: '確認', permission: { network: true, paths: [] } };
+        assert.throws(() => validateResult(result, stage));
+      }
+    }
+  }
+  for (const returnTo of ['execute', 'prereview']) assert.equal(validateResult({ ...revise, returnTo }, 'review').returnTo, returnTo);
+});
+
+test('実装差し戻しはtargetと開始試行を保ち、計画差し戻しと上限を共有する', t => {
+  const { state } = fixture(t);
+  state.attempts = 1;
+  advance(state, ok([task]));
+  const input = () => JSON.parse(prompt(state).split('\n').at(-1));
+  const expected = input().target;
+  for (const returnTo of ['execute', 'prereview', 'execute', 'prereview']) {
+    state.stage = 'review';
+    advance(state, { ...revise, returnTo });
+    assert.equal(state.tasks[0].status, 'pending');
+    assert.equal(state.stage, returnTo === 'execute' ? 'execute' : 'plan');
+    assert.equal(input().previous, revise.summary);
+    if (returnTo === 'execute') {
+      assert.deepEqual(input().target, expected);
+      assert.equal(state.taskStartAttempt, 1);
+    }
+  }
+  assert.equal(state.revisions, 4);
+  assert.equal(state.status, 'blocked');
+});
+
+test('reviewの証拠はタスク開始以降のpartialと再実装を含み、次タスクとは分離する', t => {
+  const { state } = fixture(t);
+  const input = () => JSON.parse(prompt(state).split('\n').at(-1));
+  state.attempts = 1;
+  advance(state, ok([task, { title: '次', acceptance: '次の条件' }]));
+  assert.equal(state.taskStartAttempt, 1);
+  state.evidence = [{ attempt: 0 }, { attempt: 2 }];
+  state.attempts = 2;
+  advance(state, { ...ok(), outcome: 'partial' });
+  state.evidence.push({ attempt: 3 });
+  state.attempts = 3;
+  advance(state, ok());
+  assert.deepEqual(input().evidence, [{ attempt: 2 }, { attempt: 3 }]);
+  state.attempts = 4;
+  advance(state, { ...revise, returnTo: 'execute' });
+  state.evidence.push({ attempt: 5 });
+  state.attempts = 5;
+  advance(state, ok());
+  assert.deepEqual(input().evidence, [{ attempt: 2 }, { attempt: 3 }, { attempt: 5 }]);
+  state.attempts = 6;
+  advance(state, ok());
+  assert.equal(state.taskStartAttempt, 6);
+  state.evidence.push({ attempt: 7 });
+  state.attempts = 7;
+  advance(state, ok());
+  assert.deepEqual(input().evidence, [{ attempt: 7 }]);
+  state.attempts = 8;
+  advance(state, ok());
+  assert.equal(state.stage, 'acceptance');
+  assert.deepEqual(input().evidence, state.evidence);
+  state.stage = 'review';
+  delete state.taskStartAttempt;
+  assert.deepEqual(input().evidence, state.evidence);
+  advance(state, revise);
+  state.attempts = 9;
+  advance(state, ok([task]));
+  assert.equal(state.taskStartAttempt, 9);
+});

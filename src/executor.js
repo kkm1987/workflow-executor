@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, event, advance, prompt } from './workflow.js';
+import { root, dataRoot, directory, save, event, advance, prompt, targetTask } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
@@ -282,7 +282,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   mkdirSync(dir);
   state.status = 'running';
   state.work = { attempt: state.attempts, stage: state.stage, ...value,
-    scope: (['execute', 'review'].includes(state.stage) ? state.tasks.find(task => task.status !== 'completed')?.title : state.change)
+    scope: (['execute', 'review'].includes(state.stage) ? targetTask(state)?.title : state.change)
       ?? state.requirement.split(/\r?\n/).find(line => line.trim())?.slice(0, 500) ?? '対象未記録',
     startedAt: state.inputAt };
   state.activity = null;

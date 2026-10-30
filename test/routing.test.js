@@ -15,7 +15,7 @@ const report = { scope: '入力検証の実装と受け入れ条件', decisions:
 const passed = async () => ({ ok: true });
 const noLimits = async () => null;
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
-const ok = { report, outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
+const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, approvals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
 
 test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
@@ -365,7 +365,7 @@ test('changeの1タスク群でも独立レビューと最終確認を通り、�
   assert.equal(state.status, 'completed');
   for (let index = 0; index < 4; index++) {
     state.stage = 'review';
-    advance(state, { ...ok, outcome: 'revise', summary: '修正が必要' });
+    advance(state, { ...ok, outcome: 'revise', returnTo: 'prereview', summary: '修正が必要' });
     assert.equal(state.stage, 'prereview');
   }
   assert.equal(state.status, 'blocked');

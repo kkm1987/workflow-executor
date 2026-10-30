@@ -14,7 +14,7 @@ const enough = { primary: { usedPercent: 80 }, secondary: { usedPercent: 90 } };
 const low = { primary: { usedPercent: 99 } };
 const passed = async () => ({ ok: true });
 const report = { scope: '代替選択', decisions: [], verification: '試験済み', remaining: 'なし' };
-const ok = { report, outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [{ title: '実装', acceptance: '動作する' }] };
+const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [{ title: '実装', acceptance: '動作する' }] };
 
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'fallback-'));
