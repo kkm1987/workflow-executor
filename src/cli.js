@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { reserve } from './locking.js';
 import { resolve } from 'node:path';
-import { create, load, answer, approve, grant, dataRoot, list, summary, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
+import { create, load, close, answer, approve, grant, dataRoot, list, summary, brief, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
 import { step, run } from './executor.js';
 import { startChange, archive } from './changes.js';
 
@@ -15,14 +15,16 @@ const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   fallback <ID> <工程> <モデル> [推論レベル]
   fallback <ID> <工程> --disable
   archive <ID>                 completedのchangeを同期・アーカイブ
+  close <ID> [理由ファイル]       実行中以外の案件を終了
   step <ID>                     次の1工程を実行
   run <ID>                      回答待ち・失敗・完了まで工程を進める
-  answer <ID> <回答ファイル>      チャットで受け取った回答を保存
+  answer <ID> <回答ファイル> [--inquiry]  回答を保存（--inquiryは確認の質問）
   approve <ID> [条件ファイル]    承認計画を承認し、条件を保存
   grant <ID> [--network] [--path <ディレクトリ>]...  権限要求を許可して再開
   retry <ID>                 失敗・中断後、変更確認を経て再開可能にする
   evidence <ID> <JSONファイル>  停止中の案件へ外部証拠を登録
-  status [ID]                   状態と必要な対応を確認
+  status [ID | --all]            状態を確認（一覧は終了を除外、--allで全件）
+  status <ID> --detail           履歴・外部証拠を含む詳細を確認
 要求・回答ファイル、一時ファイルはagent-docs/以下に置く。`;
 
 let release;
@@ -30,12 +32,14 @@ try {
   if (!command || command === '--help') {
     console.log(help);
   } else {
-    if (!['start', 'start-change', 'model', 'fallback', 'archive', 'step', 'run', 'answer', 'approve', 'grant', 'retry', 'status', 'evidence'].includes(command)) throw new Error(help);
-    const counts = { step: 1, run: 1, answer: 2, retry: 1, archive: 1, evidence: 2 };
-    if ((counts[command] && args.length !== counts[command]) || (command === 'status' && args.length > 1) ||
+    if (!['start', 'start-change', 'model', 'fallback', 'archive', 'close', 'step', 'run', 'answer', 'approve', 'grant', 'retry', 'status', 'evidence'].includes(command)) throw new Error(help);
+    const counts = { step: 1, run: 1, retry: 1, archive: 1, evidence: 2 };
+    if ((counts[command] && args.length !== counts[command]) ||
+      (command === 'answer' && !(args.length === 2 || (args.length === 3 && args[2] === '--inquiry'))) ||
+      (command === 'status' && !(args.length <= 1 || (args.length === 2 && args[0] !== '--all' && !args[0].startsWith('--') && args[1] === '--detail'))) ||
       (command === 'model' && ![3, 4].includes(args.length)) ||
       (command === 'fallback' && (![3, 4].includes(args.length) || (args[2] === '--disable' && args.length !== 3))) ||
-      (command === 'approve' && ![1, 2].includes(args.length))) throw new Error(help);
+      (['approve', 'close'].includes(command) && ![1, 2].includes(args.length))) throw new Error(help);
     if (command === 'status') dashboard();
     let state;
     if (['start', 'start-change'].includes(command)) {
@@ -67,7 +71,7 @@ try {
         state = create(target, readFileSync(resolve(request), 'utf8'), dataRoot, id, { models, fallbacks });
       }
     }
-    else if (command === 'status' && !args.length) console.log(JSON.stringify(list().map(state => summary(state)), null, 2));
+    else if (command === 'status' && (!args.length || args[0] === '--all')) console.log(JSON.stringify(list().filter(state => args[0] === '--all' || state.status !== 'closed').map(state => brief(summary(state))), null, 2));
     else {
       if (command !== 'status') release = reserve(dataRoot, () => {
         const current = load(args[0]);
@@ -81,10 +85,11 @@ try {
       state = load(args[0]);
       if (command === 'step') await step(state);
       else if (command === 'run') await run(state, undefined, undefined, current => {
-        console.log(JSON.stringify(summary(current)));
+        console.log(JSON.stringify(brief(summary(current))));
       });
-      else if (command === 'answer') answer(state, readFileSync(resolve(args[1]), 'utf8'));
+      else if (command === 'answer') answer(state, readFileSync(resolve(args[1]), 'utf8'), dataRoot, args[2] === '--inquiry');
       else if (command === 'approve') approve(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
+      else if (command === 'close') close(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'grant') {
         const options = { network: false, paths: [] };
         for (let i = 1; i < args.length; i++) {
@@ -100,7 +105,7 @@ try {
       else if (command === 'fallback') setFallback(state, args[1], args[2] === '--disable' ? null : args[2], args[3]);
       else if (command === 'archive') console.log(await archive(state));
     }
-    if (state) console.log(JSON.stringify(summary(state), null, 2));
+    if (state) console.log(JSON.stringify(command === 'status' && args[1] === '--detail' ? summary(state) : brief(summary(state)), null, 2));
     if (state && ['failed', 'blocked', 'limited'].includes(state.status)) process.exitCode = 1;
   }
 } catch (error) {

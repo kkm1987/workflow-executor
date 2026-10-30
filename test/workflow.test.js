@@ -4,8 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, validateResult, lock, prompt, summary, list, dashboard } from '../src/workflow.js';
-import { step as nativeStep, run as nativeRun, codexArgs, runCodex } from '../src/executor.js';
+import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, validateResult, lock, prompt, summary, brief, list, dashboard } from '../src/workflow.js';
+import { step as nativeStep, run as nativeRun, codexArgs, runCodex, inputFor } from '../src/executor.js';
+import { attemptAssignment } from '../src/config.js';
 import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
 
@@ -35,6 +36,92 @@ const revise = { report, returnTo: 'prereview', outcome: 'revise', summary: '空
 const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合' }];
 const prereviewResult = (approvals = []) => ({ ...ok([task]), change: 'sample-change', approvals,
   decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要' } });
+
+test('短い要約は履歴数によらず報告と外部証拠を制限する', t => {
+  const { state, base } = fixture(t);
+  const view = summary(state, base);
+  view.latestReport = { attempt: 40, report: { ...report, scope: '長'.repeat(1000), decisions: ['理'.repeat(1000)] }, log: '元ログ' };
+  view.externalEvidence = [{ name: '測定', valid: false, expiresAt: '期限', content: '本文', host: 'ホスト' }];
+  const first = brief(view);
+  view.history = Array.from({ length: 40 }, () => ({ report, log: '長'.repeat(1000) }));
+  assert.deepEqual(brief(view), first);
+  assert.equal(first.latestReport.report.scope.length, 500);
+  assert.equal(first.latestReport.report.decisions[0].length, 500);
+  assert.deepEqual(Object.keys(first.latestReport), ['attempt', 'report']);
+  assert.deepEqual(first.externalEvidence, [{ name: '測定', valid: false, expiresAt: '期限' }]);
+  assert.ok(!Object.hasOwn(first, 'history'));
+  assert.ok(!Object.hasOwn(first, 'selection'));
+  assert.equal(view.history.length, 40);
+});
+
+for (const permission of [undefined, { network: true, paths: [] }]) {
+  test(`確認の質問は回答や許可にせず再開し待機へ戻る（権限要求=${Boolean(permission)}）`, async t => {
+    const { state, base } = fixture(t);
+    state.stage = 'execute';
+    state.status = 'waiting';
+    state.question = '元の質問';
+    if (permission) state.permission = permission;
+    state.session = { stage: state.stage, ...attemptAssignment(state), sessionId: '保存セッション' };
+    answer(state, 'その判断の理由は？', base, true);
+    assert.equal(state.answers.at(-1).inquiry, true);
+    assert.equal(state.question, '元の質問');
+    assert.deepEqual(state.permission, permission);
+    assert.equal(state.grants, undefined);
+    assert.match(inputFor(state), /回答ではありません/);
+    assert.match(inputFor(state), /その判断の理由は？/);
+    assert.ok(codexArgs(state, base).includes('resume'));
+    const session = state.session;
+    delete state.session;
+    assert.match(inputFor(state), /answersの最後がinquiry/);
+    const context = JSON.parse(inputFor(state).split('\n').at(-1));
+    assert.equal(context.question, '元の質問');
+    assert.deepEqual(context.permission, permission);
+    state.session = session;
+    await step(state, async current => {
+      assert.ok(codexArgs(current, base).includes('保存セッション'));
+      assert.match(inputFor(current), /回答ではありません/);
+      return { ...ok(), outcome: permission ? 'permission' : 'question',
+        question: '判断の理由を説明。元の質問', ...(permission ? { permission } : {}) };
+    }, base);
+    assert.equal(state.status, 'waiting');
+    assert.deepEqual(state.permission, permission);
+  });
+}
+
+test('承認待ちへの確認の質問は保存状態も変更しない', t => {
+  const { state, base } = fixture(t);
+  state.status = 'waiting';
+  state.approval = { status: 'pending', items: approvalItems };
+  state.permission = { network: true, paths: [] };
+  save(state, base);
+  const before = structuredClone(state);
+  const saved = load(state.id, base);
+  assert.throws(() => answer(state, '理由は？', base, true), /承認待ち/);
+  assert.deepEqual(state, before);
+  assert.deepEqual(load(state.id, base), saved);
+});
+
+test('全工程で質問だけで判断できる理由・選択肢・影響と権限要求の説明を求める', t => {
+  const { state } = fixture(t);
+  for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
+    state.stage = stage;
+    const input = prompt(state);
+    for (const text of ['他の資料を読まなくてもそれだけで判断できる', '判断が必要な理由',
+      '選択肢とそれぞれの影響（作業量・リスク・後戻りの可否）', '推奨があれば推奨と理由',
+      'permissionでは必要な理由と許可しない場合の影響']) assert.ok(input.includes(text), `${stage}: ${text}`);
+  }
+});
+
+test('実行前レビューはユーザーの作業をまとめ、依頼回数と根拠を求める', t => {
+  const { state } = fixture(t);
+  state.stage = 'prereview';
+  const input = prompt(state);
+  for (const text of ['ユーザーの作業（ビルド、実機・手動確認、外部での承認や操作）',
+    '依存関係と検証可能性を損なわない範囲', '先行するソースコード変更をまとめてから一度に依頼する順序と粒度',
+    '承認計画の項目も同じ操作はまとめる', 'decisions.applicabilityにユーザーへの依頼回数とその根拠']) assert.ok(input.includes(text));
+  state.stage = 'plan';
+  assert.ok(!prompt(state).includes('ユーザーへの依頼回数'));
+});
 
 test('承認計画の必須項目を検証し、空配列を受理する', () => {
   const schema = JSON.parse(readFileSync(join(root, 'src/prereview.schema.json'), 'utf8'));
@@ -85,7 +172,9 @@ test('承認は計画・条件・日時とイベントを保存し、承認待�
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
   const proposedAt = state.approval.proposedAt;
+  state.session = { stage: 'prereview', sessionId: '計画' };
   approve(state, '合計€20以内', base);
+  assert.equal(state.session, undefined);
   assert.equal(state.status, 'ready');
   assert.equal(state.stage, 'execute');
   assert.equal(state.question, '');
@@ -107,13 +196,15 @@ test('承認計画へのanswerは回答を保存して実行前レビューへ�
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
   const question = state.question;
-  state.session = { sessionId: '古い実装セッション' };
+  const session = { stage: 'prereview', sessionId: '計画' };
+  state.session = session;
   answer(state, 'VMは使用しない', base);
   assert.equal(state.status, 'ready');
   assert.equal(state.stage, 'prereview');
   assert.equal(state.approval, undefined);
-  assert.equal(state.session, undefined);
-  assert.deepEqual(state.answers.at(-1), { stage: 'execute', question, answer: 'VMは使用しない' });
+  assert.deepEqual(state.session, session);
+  assert.deepEqual(state.answers.at(-1), { stage: 'execute', question, answer: 'VMは使用しない', approval: true });
+  assert.deepEqual(load(state.id, base).session, session);
   assert.equal(load(state.id, base).stage, 'prereview');
 });
 
@@ -749,7 +840,7 @@ test('実装差し戻しはtargetと開始試行を保ち、計画差し戻し�
   assert.equal(state.status, 'blocked');
 });
 
-test('reviewの証拠はタスク開始以降のpartialと再実装を含み、次タスクとは分離する', t => {
+test('executeとreviewの証拠はタスク開始以降のpartialと再実装を含み、次タスクとは分離する', t => {
   const { state } = fixture(t);
   const input = () => JSON.parse(prompt(state).split('\n').at(-1));
   state.attempts = 1;
@@ -758,12 +849,15 @@ test('reviewの証拠はタスク開始以降のpartialと再実装を含み、�
   state.evidence = [{ attempt: 0 }, { attempt: 2 }];
   state.attempts = 2;
   advance(state, { ...ok(), outcome: 'partial' });
+  assert.equal(state.stage, 'execute');
+  assert.deepEqual(input().evidence, [{ attempt: 2 }]);
   state.evidence.push({ attempt: 3 });
   state.attempts = 3;
   advance(state, ok());
   assert.deepEqual(input().evidence, [{ attempt: 2 }, { attempt: 3 }]);
   state.attempts = 4;
   advance(state, { ...revise, returnTo: 'execute' });
+  assert.deepEqual(input().evidence, [{ attempt: 2 }, { attempt: 3 }]);
   state.evidence.push({ attempt: 5 });
   state.attempts = 5;
   advance(state, ok());
@@ -771,6 +865,8 @@ test('reviewの証拠はタスク開始以降のpartialと再実装を含み、�
   state.attempts = 6;
   advance(state, ok());
   assert.equal(state.taskStartAttempt, 6);
+  assert.equal(state.stage, 'execute');
+  assert.deepEqual(input().evidence, []);
   state.evidence.push({ attempt: 7 });
   state.attempts = 7;
   advance(state, ok());
@@ -779,9 +875,11 @@ test('reviewの証拠はタスク開始以降のpartialと再実装を含み、�
   advance(state, ok());
   assert.equal(state.stage, 'acceptance');
   assert.deepEqual(input().evidence, state.evidence);
-  state.stage = 'review';
   delete state.taskStartAttempt;
-  assert.deepEqual(input().evidence, state.evidence);
+  for (const stage of ['execute', 'review']) {
+    state.stage = stage;
+    assert.deepEqual(input().evidence, state.evidence);
+  }
   advance(state, revise);
   state.attempts = 9;
   advance(state, ok([task]));

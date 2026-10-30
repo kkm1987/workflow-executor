@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { reserve } from './locking.js';
 import { resolve, join } from 'node:path';
 import { capture } from './commands.js';
-import { create, save, event, dataRoot, validChangeName } from './workflow.js';
+import { create, save, event, close, dataRoot, validChangeName } from './workflow.js';
 import { validateModel, validateAssignments, stagesFor } from './config.js';
 
 const openspec = fileURLToPath(new URL('../node_modules/@fission-ai/openspec/bin/openspec.js', import.meta.url));
@@ -45,6 +45,7 @@ export async function archive(state, base = dataRoot, execute = runOpenSpec) {
   try {
     const output = await execute(openSpecRoot(state).root, ['archive', state.change, '-y', '--json', ...storeArgs(state)]);
     event(state, 'archived', { change: state.change, ...openSpecRoot(state), output }, base);
+    close(state, 'archived', base);
     return output;
   } catch (error) {
     event(state, 'archive_failed', { change: state.change, ...openSpecRoot(state), error: error.message }, base);

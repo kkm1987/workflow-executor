@@ -261,6 +261,41 @@ test('質問のセッションは回答だけで再開し、進行・変更・re
   assert.equal(state.session, undefined);
 });
 
+test('承認計画への回答は同じ担当のセッションへ説明と回答だけを渡し、担当・証拠の変更で新規になる', async t => {
+  const { target, base } = fixture(t);
+  for (const model of ['gpt-6-luna', 'claude-opus-5-5']) {
+    const state = create(target, '試験', base);
+    Object.assign(state, { kind: 'change', stage: 'prereview', change: 'sample-change',
+      models: { prereview: { model, effort: 'medium' } } });
+    await step(state, async (current, dir) => {
+      writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: '計画セッション' }));
+      return { ...prereview, approvals: [{ tasks: '入力検証', action: 'VMで検証', limits: '20ユーロ', stopWhen: '上限到達' }] };
+    }, base, passed, noLimits, async () => {});
+    assert.equal(state.status, 'waiting');
+    assert.equal(state.session.stage, 'prereview');
+    answer(state, 'VMは使用しない', base);
+    const saved = structuredClone(state.session);
+    const expected = '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\nVMは使用しない';
+    assert.equal(inputFor(state), expected);
+    const args = () => assignment(state).cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, '新規');
+    const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';
+    assert.equal(args()[args().indexOf(resumeFlag) + 1], saved.sessionId);
+    for (const changed of [
+      { cli: saved.cli === 'codex' ? 'claude' : 'codex' }, { model: '別モデル' }, { effort: 'low' },
+      { externalEvidence: [{ id: 1, valid: true }] },
+    ]) {
+      state.session = { ...saved, ...changed };
+      assert.equal(resumeSession(state), null);
+      assert.ok(!args().includes(resumeFlag));
+      const input = inputFor(state);
+      assert.match(input, /Workflow Executorのprereview工程/);
+      assert.equal(JSON.parse(input.split('\n').at(-1)).answers.at(-1).answer, 'VMは使用しない');
+    }
+    state.session = saved;
+    assert.equal(inputFor(state), expected);
+  }
+});
+
 test('再開エラーは試行として記録し、新規コンテキストで一度だけやり直す', async t => {
   const { target, base } = fixture(t);
   const state = create(target, '試験', base);
@@ -399,13 +434,16 @@ test('archiveはcompletedのchangeだけ実行し、失敗してもcompletedを�
   const state = create(target, '試験', base);
   await assert.rejects(archive(state, base, async () => assert.fail('呼び出さない')), /completed/);
   state.kind = 'change'; state.change = 'sample-change'; state.status = 'completed';
+  await assert.rejects(archive(state, base, async () => { throw new Error('同期失敗'); }), /同期失敗/);
+  assert.equal(state.status, 'completed');
   await archive(state, base, async (cwd, args) => {
     assert.equal(cwd, target);
     assert.deepEqual(args, ['archive', 'sample-change', '-y', '--json']);
     return '{"success":true}';
   });
-  await assert.rejects(archive(state, base, async () => { throw new Error('同期失敗'); }), /同期失敗/);
-  assert.equal(state.status, 'completed');
+  assert.equal(state.status, 'closed');
+  assert.equal(state.closed.reason, 'archived');
+  assert.equal(state.closed.from, 'completed');
   const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8');
   assert.match(events, /archived/);
   assert.match(events, /archive_failed/);

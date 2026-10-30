@@ -312,3 +312,105 @@ test('統合: 枠不足で代替実装し、独立レビューを通り次の実
   assert.equal(summary(loaded, base).history[1].cli, 'claude');
   assert.equal(readFileSync(join(base, state.id, 'state.json'), 'utf8'), saved);
 });
+
+test('進捗なしpartialは2回で止まり、回答後は同じタスクを新規入力で続ける', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base);
+  Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }] });
+  const partial = async (current, dir) => {
+    current.evidence ??= [];
+    current.evidence.push({ attempt: current.attempts, changedFiles: [], openspec: { changedFiles: [] } });
+    writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: 'partial-session' }));
+    return { ...ok, outcome: 'partial', summary: '調査のみ' };
+  };
+  await step(state, partial, base, passed, async () => enough);
+  assert.equal(state.status, 'ready');
+  await step(state, partial, base, passed, async () => enough);
+  assert.equal(state.status, 'waiting');
+  assert.equal(state.session, undefined);
+  for (const text of ['調査のみ', '続行', '計画見直し', 'close']) assert.ok(state.question.includes(text));
+  answer(state, '別の手順で続行', base);
+  assert.equal(state.idlePartials, 0);
+  await step(state, async current => {
+    assert.equal(resumeSession(current), null);
+    assert.match(inputFor(current), /別の手順で続行/);
+    assert.equal(current.stage, 'execute');
+    return { ...ok, outcome: 'question', question: '確認' };
+  }, base, passed, async () => enough);
+  assert.equal(state.idlePartials, undefined);
+});
+
+test('対象またはOpenSpecの変更が進捗なしをリセットし、通算上限は維持する', async t => {
+  const { target, base } = fixture(t);
+  for (const spec of [false, true]) {
+    const state = create(target, '要求', base);
+    Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }] });
+    for (let i = 0; i < 11; i++) {
+      await step(state, async current => {
+        const changed = i % 2 === 1;
+        current.evidence ??= [];
+        current.evidence.push({ attempt: current.attempts, changedFiles: changed && !spec ? ['code.js'] : [], openspec: { changedFiles: changed && spec ? ['tasks.md'] : [] } });
+        return { ...ok, outcome: 'partial' };
+      }, base, passed, async () => enough);
+      assert.equal(state.status, i === 10 ? 'blocked' : 'ready');
+    }
+  }
+});
+
+test('失敗で代替へ切り替え、partialでも継続し、次のタスクは通常側に戻る', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base, undefined, { fallbacks: { execute: claude } });
+  Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }, { title: '次', acceptance: '確認', status: 'pending' }] });
+  const observed = [];
+  await run(state, async current => {
+    observed.push([current.stage, attemptAssignment(current).cli]);
+    if (observed.length === 1) throw new Error('環境エラー');
+    if (observed.length === 2) {
+      const input = JSON.parse(inputFor(current).split('\n').at(-1));
+      assert.equal(input.failures[0].error, '環境エラー');
+      assert.equal(resumeSession(current), null);
+      assert.equal(current.selection.reason, '通常側の失敗により代替を選択');
+      return { ...ok, outcome: 'partial' };
+    }
+    return ok;
+  }, base, undefined, passed, async () => enough);
+  assert.deepEqual(observed, [['execute', 'codex'], ['execute', 'claude'], ['execute', 'claude'], ['review', 'codex'], ['execute', 'codex'], ['review', 'codex'], ['acceptance', 'codex']]);
+  assert.equal(state.failureStreak, undefined);
+  assert.equal(state.envFallback, undefined);
+});
+
+test('代替も失敗すると2回で止まり、retryの入力と状態表示に失敗履歴が残る', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
+  let calls = 0;
+  const fail = async () => { calls++; throw new Error('E'.repeat(600)); };
+  await step(state, fail, base, passed, async () => enough);
+  assert.equal(calls, 2);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.failureStreak.count, 2);
+  assert.match(summary(state, base).nextAction, /2回連続.*人/);
+  retry(state, base);
+  assert.equal(state.failureStreak.count, 2);
+  assert.equal(JSON.parse(inputFor(state).split('\n').at(-1)).failures[0].error.length, 500);
+  await step(state, fail, base, passed, async () => enough);
+  retry(state, base);
+  await step(state, fail, base, passed, async () => enough);
+  assert.equal(state.failureStreak.count, 4);
+  assert.deepEqual(state.failureStreak.entries.map(entry => entry.attempt), [2, 3, 4]);
+  retry(state, base);
+  await step(state, async () => ok, base, passed, async () => enough);
+  assert.equal(state.failureStreak, undefined);
+});
+
+test('代替なしは自動再実行せず、失敗後の代替不足・取得不能・確認失敗は停止する', async t => {
+  const { target, base } = fixture(t);
+  for (const alternative of [undefined, low, null, 'preflight']) {
+    const state = create(target, '要求', base, undefined, { fallbacks: alternative === undefined ? {} : { plan: claude } });
+    let calls = 0;
+    await step(state, async () => { calls++; return { ...ok, outcome: 'error', summary: '環境エラー' }; }, base,
+      async current => ({ ok: alternative !== 'preflight' || current.attemptAssignment?.cli !== 'claude', error: '代替確認失敗' }),
+      async (_, value) => value.cli === 'codex' || alternative === 'preflight' ? enough : alternative);
+    assert.equal(calls, 1);
+    assert.equal(state.status, alternative === undefined || alternative === 'preflight' ? 'failed' : 'limited');
+  }
+});

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, event, advance, prompt, targetTask } from './workflow.js';
+import { root, dataRoot, directory, save, event, advance, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
@@ -23,7 +23,12 @@ export function resumeSession(state) {
     ['cli', 'model', 'effort'].every(key => session[key] === value[key]) ? session : null;
 }
 
-export const inputFor = state => resumeSession(state) ? state.answers.at(-1).answer : prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
+export function inputFor(state) {
+  if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
+  const last = state.answers.at(-1);
+  if (last.inquiry) return 'クライアントからの確認の質問です。回答ではありません。作業を進めず、判断の理由を説明し、元の質問（権限要求なら同じpermission）を保ってoutcome=question（またはpermission）で返してください。\n' + last.answer;
+  return (last.approval ? '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\n' : '') + last.answer;
+}
 
 export function codexArgs(state, dir) {
   const value = attemptAssignment(state);
@@ -238,19 +243,23 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   }
   const normal = assignment(state, config);
   const fallback = fallbackAssignment(state, config);
+  const scope = attemptScope(state);
+  if (!sameScope(state.envFallback, scope)) delete state.envFallback;
+  const envFallback = sameScope(state.envFallback, scope);
   let value = normal;
   let beforeLimits = await limits(state, normal);
   const selection = { stage: state.stage, normal: { ...normal, rateLimits: beforeLimits }, fallback: fallback ? { ...fallback, rateLimits: null } : null,
     reason: beforeLimits ? '通常側の利用枠が十分' : '通常側の利用枠が未取得', selected: normal };
-  if (insufficient(beforeLimits, config.limits[state.stage])) {
+  if (envFallback || insufficient(beforeLimits, config.limits[state.stage])) {
     const alternative = fallback ? await limits(state, fallback) : null;
     if (fallback) selection.fallback.rateLimits = alternative;
     if (fallback && (alternative?.primary || alternative?.secondary) && !insufficient(alternative, config.limits[state.stage])) {
       value = fallback; beforeLimits = alternative;
-      selection.reason = '通常側の利用枠不足により代替を選択'; selection.selected = fallback;
+      selection.reason = envFallback ? '通常側の失敗により代替を選択' : '通常側の利用枠不足により代替を選択'; selection.selected = fallback;
     } else {
       selection.reason = !fallback ? '通常側の利用枠不足・代替未指定' : !alternative?.primary && !alternative?.secondary ? '通常側の利用枠不足・代替の利用枠が未取得' : '通常側・代替とも利用枠不足';
       selection.selected = null;
+      if (envFallback) selection.reason = !fallback ? '通常側の失敗・代替未指定' : !alternative?.primary && !alternative?.secondary ? '通常側の失敗・代替の利用枠が未取得' : '通常側の失敗・代替の利用枠不足';
     }
   }
   state.selection = selection;
@@ -313,7 +322,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     }
     advance(state, result);
     if (state.status !== 'waiting') delete state.session;
-    if (state.status === 'waiting' && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
+    if (state.status === 'waiting' && result.outcome !== 'partial' && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
     event(state, state.status === 'completed' ? 'completed' : state.status === 'failed' ? 'failed' : 'finished', result, base);
   } catch (error) {
@@ -324,6 +333,13 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     event(state, state.status, error.message, base);
   } finally {
     clearInterval(heartbeat);
+    if (state.status === 'failed') {
+      const previous = sameScope(state.failureStreak, scope) ? state.failureStreak : null;
+      state.failureStreak = { ...scope, count: (previous?.count ?? 0) + 1,
+        entries: [...(previous?.entries ?? []), { attempt: state.attempts, cli: value.cli, model: value.model, error: String(state.error).slice(0, 500) }].slice(-3) };
+      delete state.session;
+    } else delete state.failureStreak;
+    if (!sameScope(state.envFallback, attemptScope(state))) delete state.envFallback;
     const invocationPath = join(dir, 'invocation.json');
     const invocation = JSON.parse(readFileSync(invocationPath, 'utf8'));
     writeFileSync(invocationPath, JSON.stringify({ ...invocation, activity: state.activity }, null, 2));
@@ -342,8 +358,9 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     delete state.attemptAssignment;
     save(state, base);
   }
-  if (resumed && metric.status === 'failed') {
-    event(state, 'resume_failed', { attempt: state.attempts, error: state.error }, base);
+  if (metric.status === 'failed' && ((fallback && value === normal && !envFallback) || (resumed && state.failureStreak.count === 1))) {
+    if (fallback && value === normal && !envFallback) state.envFallback = scope;
+    event(state, 'failure_retry', { attempt: state.attempts, error: state.error, envFallback: state.envFallback ?? null }, base);
     state.status = 'ready';
     delete state.error;
     save(state, base);
@@ -353,6 +370,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
 }
 
 export async function run(state, runner = runCodex, base = dataRoot, onProgress = () => {}, check = preflight, limits = rateLimits, validate = validatePrereview) {
+  if (state.status === 'closed') throw new Error('終了した案件は実行できません');
   if (state.status !== 'ready') return state;
   delete state.attemptAssignment;
   if (!await prepare(state, base, check)) { onProgress(state); return state; }
