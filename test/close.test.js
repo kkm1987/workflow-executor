@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { root, create, save, load, close, summary, answer, approve, grant, retry, registerEvidence, setModel, setFallback } from '../src/workflow.js';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { root, create, save, load, close, summary, answer, approve, grant, retry, registerEvidence, setModel, setFallback, dashboard } from '../src/workflow.js';
 import { run, step } from '../src/executor.js';
 import { archive } from '../src/changes.js';
 
@@ -88,6 +90,8 @@ test('CLIの終了と一覧・全件・ID指定、Markdownと公開要約の除�
   cpSync(join(root, 'test', 'fixtures', 'workflow.config.json'), join(dir, 'workflow.config.json'));
   const base = join(dir, 'data');
   const waiting = create(target, '回答を待つ案件', base); waiting.status = 'waiting'; save(waiting, base);
+  const attempt = join(base, state.id, 'attempt-0001'); mkdirSync(attempt);
+  writeFileSync(join(attempt, 'result.json'), '{"summary":"過去の結果"}');
   const reason = join(dir, '理由.txt'); writeFileSync(reason, '使わない');
   const cli = (...args) => JSON.parse(execFileSync(process.execPath, [join(dir, 'src', 'cli.js'), ...args], { encoding: 'utf8', windowsHide: true }));
   const closed = cli('close', state.id, reason);
@@ -95,6 +99,16 @@ test('CLIの終了と一覧・全件・ID指定、Markdownと公開要約の除�
   assert.deepEqual(cli('status').map(item => item.id), [waiting.id]);
   assert.equal(cli('status', '--all').length, 2);
   assert.deepEqual(cli('status', state.id).closed, closed.closed);
+  assert.deepEqual(cli('status', '--all').find(item => item.id === state.id).closed, closed.closed);
+  assert.equal(cli('status', state.id, '--detail').history[0].summary, '過去の結果');
+  const originalRead = fs.readFileSync;
+  fs.readFileSync = (path, ...args) => {
+    assert.ok(!String(path).includes(attempt), '終了した案件の試行を読み込まない');
+    return originalRead(path, ...args);
+  };
+  syncBuiltinESMExports();
+  try { dashboard(base, { config: {} }); }
+  finally { fs.readFileSync = originalRead; syncBuiltinESMExports(); }
   assert.ok(!Object.hasOwn(cli('status', waiting.id), 'history'));
   assert.ok(!Object.hasOwn(cli('status')[0], 'selection'));
   assert.deepEqual(cli('status', waiting.id, '--detail').history, []);

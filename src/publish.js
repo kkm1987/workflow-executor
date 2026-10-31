@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, openSync, closeSync, unlinkSync, statSync, utimesSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { readConfig } from './config.js';
 import { spawnCommand } from './commands.js';
 import { eventStream } from './activity.js';
@@ -11,8 +12,9 @@ import { withSharedLock, atomicWrite } from './locking.js';
 
 const project = fileURLToPath(new URL('../', import.meta.url));
 const timestamp = () => new Date().toISOString();
-export const snapshotHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const cases = snapshot => snapshot.groups.flatMap(group => group.cases.map(({ id, status, stage }) => ({ id, status, stage })));
+const cases = snapshot => snapshot.groups.flatMap(group => group.cases.map(({ id, stage, attempt }) =>
+  ({ id, group: group.label, stage, ...(group.label === '進行中' ? {} : { attempt }) })));
+const notificationKey = snapshot => JSON.stringify(cases(snapshot));
 const readRecord = base => {
   try { return JSON.parse(readFileSync(join(base, 'dashboard-publish.json'), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
@@ -29,9 +31,7 @@ export function publishStatus(base) {
 export function shouldPublish(snapshot, value, config, at = Date.now()) {
   if (!config?.url) return false;
   if (value.url !== config.url) return true;
-  if (snapshotHash(snapshot) === value.hash) return false;
-  return JSON.stringify(cases(snapshot)) !== JSON.stringify(value.cases)
-    || !value.startedAt || at - Date.parse(value.startedAt) >= config.intervalSeconds * 1000;
+  return notificationKey(snapshot) !== JSON.stringify(value.cases);
 }
 
 export function startPublisher(base, config) {
@@ -118,7 +118,7 @@ async function publishFile(file, config, command, prefix) {
   });
 }
 
-export async function runPublisher(base, config, { command = 'claude', prefix = [], launch = startPublisher } = {}) {
+export async function runPublisher(base, config, { command = 'claude', prefix = [], launch = startPublisher, wait = delay } = {}) {
   if (!config?.url) return false;
   const lock = join(base, 'dashboard-publish.lock');
   const token = randomUUID();
@@ -137,35 +137,42 @@ export async function runPublisher(base, config, { command = 'claude', prefix = 
       }
       unlinkSync(lock);
     } catch { return false; }
-    return runPublisher(base, config, { command, prefix, launch });
+    return runPublisher(base, config, { command, prefix, launch, wait });
   }
   const ownsLock = () => { try { return JSON.parse(readFileSync(lock, 'utf8')).token === token; } catch { return false; } };
   const heartbeat = setInterval(() => { if (ownsLock()) { try { const at = new Date(); utimesSync(lock, at, at); } catch {} } }, 1000);
   let temporary;
   let followup = false;
   let success = false;
-  let attemptedHash;
+  let attemptedKey;
+  let failures = 0;
   try {
     mkdirSync(join(project, 'agent-docs'), { recursive: true });
     temporary = mkdtempSync(join(project, 'agent-docs', 'dashboard-publish-'));
     for (let pass = 0; pass < 3; pass++) {
       const prepared = withSharedLock(base, () => {
         const snapshot = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'));
-        const hash = snapshotHash(snapshot);
+        const key = notificationKey(snapshot);
         const previous = readRecord(base);
-        if ((hash === previous.hash && config.url === previous.url) || !ownsLock()) return;
+        if (!shouldPublish(snapshot, previous, config) || !ownsLock()) return;
         recordLocked(base, { startedAt: timestamp() });
-        return { snapshot, hash };
+        return { snapshot, key };
       });
       if (!prepared) break;
-      const { snapshot, hash } = prepared;
-      attemptedHash = hash;
+      const { snapshot, key } = prepared;
+      attemptedKey = key;
       const file = join(temporary, 'dashboard.html');
       writeFileSync(file, renderArtifact(snapshot));
-      await publishFile(file, config, command, prefix);
-      record(base, { succeededAt: timestamp(), url: config.url, hash, cases: cases(snapshot) });
+      try { await publishFile(file, config, command, prefix); }
+      catch (error) {
+        if (failures >= 2) throw error;
+        await wait([60000, 300000][failures++]);
+        pass--;
+        continue;
+      }
+      record(base, { succeededAt: timestamp(), url: config.url, cases: cases(snapshot) });
       success = true;
-      followup = snapshotHash(JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'))) !== hash;
+      followup = notificationKey(JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'))) !== key;
       if (!followup) break;
     }
   } catch (error) {
@@ -185,9 +192,9 @@ export async function runPublisher(base, config, { command = 'claude', prefix = 
     } catch {}
   }
   // 終了直前の保存がロックで起動を見送った場合も、解放後に拾う。
-  if (attemptedHash) {
-    const latest = snapshotHash(JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8')));
-    followup = latest !== (success ? readRecord(base).hash : attemptedHash);
+  if (attemptedKey) {
+    const latest = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8'));
+    followup = shouldPublish(latest, readRecord(base), config) && (success || notificationKey(latest) !== attemptedKey);
   }
   if (followup) launch(base, config);
   return success;

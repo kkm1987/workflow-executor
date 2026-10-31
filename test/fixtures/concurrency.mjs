@@ -1,5 +1,5 @@
 import { reserve, withSharedLock } from '../../src/locking.js';
-import { load, save, dashboard } from '../../src/workflow.js';
+import { load, save, saveActivity, dashboard } from '../../src/workflow.js';
 import { run } from '../../src/executor.js';
 import { fork } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -18,13 +18,15 @@ try {
     });
     process.send({ type: 'counted' });
   }
-  else if (mode === 'save') {
+  else if (mode === 'save' || mode === 'activity') {
     const start = performance.now();
     for (let i = 0; i < 12; i++) {
       const state = load(id, base);
       state.lastResult = `保存${i}`;
-      save(state, base);
-      dashboard(base, { config: {} });
+      if (mode === 'activity') {
+        state.activity = { kind: 'report', text: `活動${i}`, at: new Date().toISOString() };
+        saveActivity(state, base);
+      } else { save(state, base); dashboard(base, { config: {} }); }
     }
     process.send({ type: 'saved', elapsed: performance.now() - start });
   } else {

@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { validateModel, validateAssignments, stagesFor, readConfig } from './config.js';
 import { readEvidence, currentEvidence, evidenceInput } from './external-evidence.js';
-import { artifactCase } from './dashboard-artifact.js';
+import { artifactCase, artifactActivity } from './dashboard-artifact.js';
 import { publishStatus, requestPublish } from './publish.js';
 import { checkGrantAccess } from './preflight.js';
 
@@ -175,6 +175,21 @@ export function save(state, base = dataRoot) {
   try { publish?.(); } catch {}
 }
 
+export function saveActivity(state, base = dataRoot) {
+  withSharedLock(base, () => {
+    state.updatedAt = now();
+    atomicWrite(join(directory(state.id, base), 'state.json'), JSON.stringify(state, null, 2));
+    const path = join(base, 'dashboard.json');
+    let snapshot;
+    try { snapshot = JSON.parse(readFileSync(path, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    const item = snapshot.groups.flatMap(group => group.cases).find(item => item.id === state.id);
+    if (!item) return;
+    Object.assign(item, artifactActivity(state));
+    atomicWrite(path, JSON.stringify(snapshot));
+  });
+}
+
 export function load(id, base = dataRoot) {
   const state = JSON.parse(readFileSync(join(directory(id, base), 'state.json'), 'utf8'));
   state.kind ??= 'request';
@@ -289,7 +304,7 @@ function dashboardLocked(base, { config, launch, at } = {}) {
   const url = path => encodeURI(path.replace(/\\/g, '/')).replace(/[()#]/g, char => `%${char.charCodeAt(0).toString(16)}`);
   const lines = ['# Workflow Executor', '', `更新: ${now()}`, '', '成果・検証結果はチャットでも確認できます。完了はクライアントの承認を意味しません。'];
   const groups = [['回答待ち', ['waiting']], ['利用枠不足', ['limited']], ['開発主体の復旧・再計画待ち', ['failed', 'blocked']], ['成果確認可能', ['completed']], ['進行中', ['ready', 'running']]];
-  const views = new Map(states.map(state => [state.id, summary(state, base)]));
+  const views = new Map(states.filter(state => state.status !== 'closed').map(state => [state.id, summary(state, base)]));
   const snapshot = { generatedAt: states.map(state => state.updatedAt).sort().at(-1) ?? null, counts: {}, groups: [] };
   for (const [label, statuses] of groups) {
     const selected = states.filter(state => statuses.includes(state.status));
@@ -308,7 +323,8 @@ function dashboardLocked(base, { config, launch, at } = {}) {
         '', `${cell(activityText(view))} / 活動時刻: ${cell(view.activity?.at ?? '未記録')}`);
       if (view.selection) lines.push('', `担当選択: ${cell(JSON.stringify(view.selection))}`);
       if (view.latestReport) lines.push('', `直近の工程報告（試行${view.latestReport.attempt}）: ${cell(JSON.stringify(view.latestReport.report))}`);
-      for (const entry of view.history) {
+      if (view.history.length > 3) lines.push('', `${view.history.length - 3}件の試行を省略。[全試行の記録](${state.id}/)`);
+      for (const entry of view.history.slice(-3)) {
         lines.push('', `試行${entry.attempt}: ${cell(entry.stage ?? '未記録')} / ${cell(entry.cli ?? '未記録')} / ${cell(entry.model ?? '未記録')} / ${cell(entry.effort ?? '未記録')} / ${cell(entry.outcome ?? entry.status)} / 対象: ${cell(entry.work?.scope ?? '未記録')}`,
           '', `報告: ${cell(entry.report ? JSON.stringify(entry.report) : `未記録${entry.summary ? ` / ${entry.summary}` : ''}`)}`,
           '', `[工程結果](${url(entry.result)}) · [担当・活動](${url(entry.invocation)}) · [成否・計測](${url(entry.metrics)}) · [元ログ](${url(entry.log)})`);

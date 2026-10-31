@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 
-export function artifactCase(view, state) {
+function publicText(state) {
   const privateText = [state.target, ...(state.externalEvidence ?? []).flatMap(entry => [entry.content, entry.source])]
     .filter(value => typeof value === 'string' && value.length);
-  const text = (value, limit = 500) => {
+  return (value, limit = 500) => {
     let result = String(value ?? '');
     for (const secret of privateText) result = result.split(secret).join('［非公開］');
     result = result.replace(/```[\s\S]*?(?:```|$)/g, '［コード省略］')
@@ -16,11 +16,19 @@ export function artifactCase(view, state) {
     const chars = Array.from(result.trim());
     return chars.slice(0, limit).join('') + (chars.length > limit ? '…' : '');
   };
+}
+
+export function artifactActivity(state) {
+  return { activity: state.activity?.kind === 'report' ? publicText(state)(state.activity.text)
+    : state.activity ? 'ツールの実行状況を更新' : '報告未取得', activityAt: state.activity?.at ?? null };
+}
+
+export function artifactCase(view, state) {
+  const text = publicText(state);
   const result = { id: view.id, name: text(view.name, 80), status: view.status, statusLabel: view.statusLabel,
     stage: view.stage, stageLabel: view.stageLabel, completed: view.completed, total: view.total,
     owner: view.owner, nextAction: view.nextAction, updatedAt: view.updatedAt,
-    activity: view.activity?.kind === 'report' ? text(view.activity.text) : view.activity ? 'ツールの実行状況を更新' : '報告未取得',
-    activityAt: view.activity?.at ?? null };
+    attempt: state.attempts ?? 0, ...artifactActivity({ ...state, activity: view.activity }) };
   if (view.question) result.question = text(view.question);
   if (['waiting', 'failed', 'blocked', 'limited'].includes(view.status)) result.reason = text(view.error ?? view.result ?? state.lastResult);
   if (view.status === 'completed') result.result = text(view.result);

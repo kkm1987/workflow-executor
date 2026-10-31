@@ -247,12 +247,12 @@ test('独立案件の予約中もCLI更新でき、answer・modelの保存を後
   assert.deepEqual(readdirSync(join(base, 'reservations')), []);
 });
 
-for (const mode of ['hold', 'hold-fail']) test(`公開通信(${mode})を合図で停止中も並行保存し、終了後のMarkdownと追随公開に両案件を保持する`, { timeout: 20000 }, async t => {
+for (const mode of ['hold', 'hold-fail']) test(`公開通信(${mode})中の並行保存でも両案件を保持し、活動だけでは追随公開しない`, { timeout: 20000 }, async t => {
   const { base, a, b } = fixture(t);
   const sa = create(a, '案件A', base), sb = create(b, '案件B', base);
   const config = { url: 'https://claude.ai/artifact/concurrency-test', model: 'claude-haiku-5-5', intervalSeconds: 300, timeoutSeconds: 10 };
   let scheduled = 0;
-  const publishing = runPublisher(base, config, { command: process.execPath, prefix: [join(root, 'test/fixtures/publisher.mjs'), mode, base], launch: () => { scheduled++; } });
+  const publishing = runPublisher(base, config, { command: process.execPath, prefix: [join(root, 'test/fixtures/publisher.mjs'), mode, base], wait: async () => {}, launch: () => { scheduled++; } });
   t.after(() => { if (existsSync(base)) writeFileSync(join(base, 'fake-release'), 'done'); });
   // 起動合図のファイルを待つ。時間の経過だけでは成功としない。
   const { watch } = await import('node:fs/promises');
@@ -265,10 +265,26 @@ for (const mode of ['hold', 'hold-fail']) test(`公開通信(${mode})を合図�
   assert.ok(existsSync(join(base, 'dashboard-publish.lock')));
   writeFileSync(join(base, 'fake-release'), 'done');
   assert.equal(await publishing, mode === 'hold');
-  assert.equal(readFileSync(join(base, 'fake-count'), 'utf8'), mode === 'hold' ? '2' : '1');
+  assert.equal(readFileSync(join(base, 'fake-count'), 'utf8'), mode === 'hold' ? '1' : '3');
   const markdown = readFileSync(join(base, 'dashboard.md'), 'utf8');
   assert.match(markdown, /案件A/); assert.match(markdown, /案件B/); assert.match(markdown, /公開状況: 最終成功/);
   const record = JSON.parse(readFileSync(join(base, 'dashboard-publish.json'), 'utf8'));
   if (mode === 'hold') assert.equal(record.cases.length, 2);
-  else { assert.match(record.failureReason, /終了コード2/); assert.equal(scheduled, 1); }
+  else { assert.match(record.failureReason, /終了コード2/); assert.equal(scheduled, 0); }
+});
+
+test('活動保存と別案件の保存・statusが並行しても両案件の状態と要約を保持する', async t => {
+  const { base, a, b } = fixture(t);
+  const sa = create(a, '活動案件', base), sb = create(b, '保存案件', base);
+  const workers = await Promise.all([
+    start(t, { mode: 'activity', base, id: sa.id }),
+    start(t, { mode: 'save', base, id: sb.id }),
+  ]);
+  for (const w of workers) { assert.equal((await w.next()).type, 'saved'); await finish(w); }
+  assert.equal(load(sa.id, base).activity.text, '活動11');
+  assert.equal(load(sb.id, base).lastResult, '保存11');
+  const items = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8')).groups.flatMap(group => group.cases);
+  assert.equal(items.length, 2);
+  assert.equal(items.find(item => item.id === sa.id).activity, '活動11');
+  assert.ok(items.find(item => item.id === sb.id));
 });

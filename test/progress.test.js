@@ -126,7 +126,14 @@ test('実プロセス: 元ログ保存・活動更新・終了前の10秒保存�
     setTimeout(() => { const args = process.argv; fs.writeFileSync(args[args.indexOf('-o')+1], ${JSON.stringify(JSON.stringify(result))}); }, 11000);
   });`);
   const running = checked(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base);
-  await new Promise(resolve => setTimeout(resolve, 10500));
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const before = readFileSync(join(base, 'dashboard.md'), 'utf8');
+  await new Promise(resolve => setTimeout(resolve, 10400));
+  const markdown = readFileSync(join(base, 'dashboard.md'), 'utf8');
+  assert.equal(markdown, before);
+  assert.doesNotMatch(markdown, /日本語の確認中/);
+  const item = JSON.parse(readFileSync(join(base, 'dashboard.json'), 'utf8')).groups.flatMap(group => group.cases).find(item => item.id === state.id);
+  assert.equal(item.activity, '日本語の確認中');
   const persisted = JSON.parse(readFileSync(join(base, state.id, 'state.json')));
   assert.equal(persisted.status, 'running');
   assert.equal(persisted.activity.text, '日本語の確認中');

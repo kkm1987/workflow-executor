@@ -58,7 +58,7 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
     for (const key of ['intervalSeconds', 'timeoutSeconds']) {
       if (value[key] !== undefined && (!Number.isSafeInteger(value[key]) || value[key] <= 0)) throw new Error(`dashboardArtifactの${key}が不正です`);
     }
-    config.dashboardArtifact = { ...value, model, intervalSeconds: value.intervalSeconds ?? 300, timeoutSeconds: value.timeoutSeconds ?? 120 };
+    config.dashboardArtifact = { ...value, model, timeoutSeconds: value.timeoutSeconds ?? 120 };
   }
   return config;
 }

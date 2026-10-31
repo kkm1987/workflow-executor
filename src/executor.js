@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
+import { root, dataRoot, directory, save, saveActivity, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
@@ -303,7 +303,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   event(state, 'started', { stage: state.stage, attempt: state.attempts }, base);
   let heartbeatError;
   const heartbeat = setInterval(() => {
-    try { save(state, base); } catch (error) {
+    try { saveActivity(state, base); } catch (error) {
       heartbeatError = error;
       clearInterval(heartbeat);
     }

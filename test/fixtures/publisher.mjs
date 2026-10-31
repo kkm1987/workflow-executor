@@ -16,10 +16,11 @@ writeFileSync(join(base, `published-${count}.html`), readFileSync(file));
 if (mode === 'change-fail') {
   const path = join(base, 'dashboard.json');
   const snapshot = JSON.parse(readFileSync(path, 'utf8'));
-  snapshot.groups[0].cases[0].activity = '失敗中に届いた新しい活動';
+  snapshot.groups[0].cases[0].stage = `失敗中の工程${count}`;
   writeFileSync(path, JSON.stringify(snapshot));
   process.exit(2);
 }
+if (mode === 'transient' && count === 1) process.exit(2);
 if (mode === 'fail') process.exit(2);
 if (mode === 'mutate') writeFileSync(file, '変更されたHTML');
 if (mode === 'timeout') await new Promise(() => { setInterval(() => {}, 1000); });
@@ -32,6 +33,8 @@ if (mode === 'change' && count === 1) {
   const path = join(base, 'dashboard.json');
   const snapshot = JSON.parse(readFileSync(path, 'utf8'));
   snapshot.groups[0].cases[0].activity = '公開中に届いた新しい活動';
+  snapshot.groups[0].cases[0].question = '質問2';
+  snapshot.groups[0].cases[0].attempt++;
   writeFileSync(path, JSON.stringify(snapshot));
 }
 const emit = event => console.log(JSON.stringify(event));
