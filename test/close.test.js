@@ -69,6 +69,9 @@ test('終了した案件のすべての変更操作は状態とイベントを�
 test('アーカイブ失敗はcompletedを保持し、成功だけがarchivedの理由で終了する', async t => {
   const { state, base } = fixture(t);
   Object.assign(state, { kind: 'change', change: 'sample', status: 'completed' }); save(state, base);
+  const change = join(state.target, 'openspec', 'changes', 'sample');
+  mkdirSync(change, { recursive: true });
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. 完了');
   await assert.rejects(archive(state, base, async () => { throw new Error('失敗'); }), /失敗/);
   assert.equal(load(state.id, base).status, 'completed');
   assert.equal(state.closed, undefined);

@@ -2,13 +2,13 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, event, advance, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
+import { root, dataRoot, directory, save, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
 import { resolveCodex, spawnCommand } from './commands.js';
-import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories } from './changes.js';
+import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, taskGate } from './changes.js';
 import { rateLimits, insufficient, limitError } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
@@ -26,14 +26,14 @@ export function resumeSession(state) {
 export function inputFor(state) {
   if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
   const last = state.answers.at(-1);
-  if (last.inquiry) return 'クライアントからの確認の質問です。回答ではありません。作業を進めず、判断の理由を説明し、元の質問（権限要求なら同じpermission）を保ってoutcome=question（またはpermission）で返してください。\n' + last.answer;
+  if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' + last.answer;
   return (last.approval ? '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\n' : '') + last.answer;
 }
 
 export function codexArgs(state, dir) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
-  const mode = ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
+  const mode = !state.answers.at(-1)?.inquiry && ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
   const paths = [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   return ['exec', ...(session ? ['resume', session.sessionId] : []), '--json',
     ...(!session ? ['--color', 'never', '-C', state.target] : []),
@@ -52,21 +52,22 @@ export function claudeArgs(state, sessionId) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
   const tools = ['Read', 'Glob', 'Grep'];
-  if (state.stage === 'prereview') {
+  const inquiry = state.answers.at(-1)?.inquiry;
+  if (!inquiry && state.stage === 'prereview') {
     tools.push('Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(ls:*)');
     tools.push('Bash(openspec list:*)', 'Bash(openspec show:*)', 'Bash(openspec status:*)', 'Bash(openspec validate:*)');
     for (const name of state.change ? [state.change] : state.candidates.map(item => item.name)) {
       const path = `${openSpecRoot(state).root.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
       tools.push(`Edit(${path})`, `Write(${path})`);
     }
-  } else if (state.stage === 'execute') {
+  } else if (!inquiry && state.stage === 'execute') {
     tools.push('Edit', 'Write', 'Bash');
     if (state.grants?.network) tools.push('WebFetch', 'WebSearch');
   }
-  const granted = state.stage === 'execute' ? state.grants : null;
-  const paths = [...(granted?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+  const granted = !inquiry && state.stage === 'execute' ? state.grants : null;
+  const paths = inquiry ? [] : [...(granted?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   return ['-p', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '--tools', `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
+    '--tools', inquiry ? 'Read,Glob,Grep' : `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
     ...(paths.length ? ['--add-dir', ...paths] : []),
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
     '--output-format', 'stream-json', '--verbose', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
@@ -230,6 +231,7 @@ export async function step(state, runner = runCodex, base = dataRoot, check = pr
 }
 
 async function executeStep(state, runner, base, limits, validate, check, checked) {
+  const inquiry = Boolean(state.answers.at(-1)?.inquiry);
   if (['granularity', 'architecture'].includes(state.stage)) {
     event(state, 'stage_migrated', { from: state.stage, to: 'plan' }, base);
     state.stage = 'plan';
@@ -307,28 +309,39 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     }
   }, 10_000);
   try {
-    const result = await runner(state, dir);
+    let result = await runner(state, dir);
     if (heartbeatError) throw heartbeatError;
     writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2));
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
-    if (state.stage === 'prereview') {
+    if (!inquiry && state.stage === 'prereview') {
       const evidence = state.evidence?.findLast(entry => entry.attempt === state.attempts);
       await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence);
     }
-    if (result.outcome === 'error' && limitError(result.summary)) {
+    if (result?.outcome === 'error' && limitError(result.summary)) {
       const error = new Error(result.summary);
       error.limited = true;
       throw error;
     }
-    advance(state, result);
+    if (!inquiry && state.kind === 'change' && state.stage === 'acceptance' && result?.outcome === 'ok') {
+      const problems = taskGate(state);
+      if (problems.length) result = { ...result, outcome: 'revise', summary: `tasks.mdの確認に失敗しました:\n${problems.join('\n')}` };
+    }
+    if (inquiry) resolveInquiry(state, result);
+    else advance(state, result);
     if (state.status !== 'waiting') delete state.session;
-    if (state.status === 'waiting' && result.outcome !== 'partial' && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
+    if (state.status === 'waiting' && (inquiry || result.outcome !== 'partial') && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
     event(state, state.status === 'completed' ? 'completed' : state.status === 'failed' ? 'failed' : 'finished', result, base);
   } catch (error) {
     state.status = error.limited || limitError(error.message) ? 'limited' : 'failed';
-    state.error = error.message;
-    delete state.session;
+    if (inquiry && state.status !== 'limited') {
+      resolveInquiry(state, { outcome: 'error', summary: error.message });
+      try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
+      if (metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
+    } else {
+      state.error = error.message;
+      delete state.session;
+    }
     metric.outcome = 'error';
     event(state, state.status, error.message, base);
   } finally {

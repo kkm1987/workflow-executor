@@ -389,6 +389,9 @@ test('実際のOpenSpecで候補を列挙し、候補なし・指定なしを開
 
 test('changeの1タスク群でも独立レビューと最終確認を通り、差し戻しはprereviewへ戻る', async t => {
   const { target, base } = fixture(t);
+  const change = join(target, 'openspec', 'changes', 'sample-change');
+  mkdirSync(change, { recursive: true });
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. 完了');
   const state = await startChange(target, 'sample-change', {}, base,
     async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
   const stages = [];
@@ -434,6 +437,9 @@ test('archiveはcompletedのchangeだけ実行し、失敗してもcompletedを�
   const state = create(target, '試験', base);
   await assert.rejects(archive(state, base, async () => assert.fail('呼び出さない')), /completed/);
   state.kind = 'change'; state.change = 'sample-change'; state.status = 'completed';
+  const change = join(target, 'openspec', 'changes', state.change);
+  mkdirSync(change, { recursive: true });
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. 完了');
   await assert.rejects(archive(state, base, async () => { throw new Error('同期失敗'); }), /同期失敗/);
   assert.equal(state.status, 'completed');
   await archive(state, base, async (cwd, args) => {

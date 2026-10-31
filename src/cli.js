@@ -105,7 +105,9 @@ try {
       else if (command === 'fallback') setFallback(state, args[1], args[2] === '--disable' ? null : args[2], args[3]);
       else if (command === 'archive') console.log(await archive(state));
     }
-    if (state) console.log(JSON.stringify(command === 'status' && args[1] === '--detail' ? summary(state) : brief(summary(state)), null, 2));
+    if (state) console.log(JSON.stringify(command === 'status' && args[1] === '--detail'
+      ? summary(state, undefined, true)
+      : brief(summary(state)), null, 2));
     if (state && ['failed', 'blocked', 'limited'].includes(state.status)) process.exitCode = 1;
   }
 } catch (error) {

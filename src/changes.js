@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { reserve } from './locking.js';
 import { resolve, join } from 'node:path';
 import { capture } from './commands.js';
@@ -13,6 +14,18 @@ export const separateOpenSpec = state => state.kind === 'change' && resolve(open
 export const storeArgs = state => openSpecRoot(state).store ? ['--store', openSpecRoot(state).store] : [];
 export const changeDirectories = state => (state.change ? [state.change] : state.candidates.map(item => item.name))
   .map(name => join(openSpecRoot(state).root, 'openspec', 'changes', name));
+
+export function taskGate(state) {
+  if (!validChangeName(state.change)) throw new Error('change名が不正です');
+  const lines = readFileSync(join(openSpecRoot(state).root, 'openspec', 'changes', state.change, 'tasks.md'), 'utf8').split(/\r?\n/);
+  return lines.filter(line => {
+    if (/^\s*- \[ \]/.test(line)) return true;
+    return [...line.matchAll(/省略（所有者の判断: 回答#(\d+)/g)].some(([, number]) => {
+      const answer = state.answers[Number(number) - 1];
+      return !answer || answer.inquiry;
+    });
+  });
+}
 
 export async function startChange(target, change, models = {}, base = dataRoot, execute = runOpenSpec, store, fallbacks = {}) {
   if (change !== undefined && !validChangeName(change)) throw new Error('change名が不正です');
@@ -43,6 +56,8 @@ export async function startChange(target, change, models = {}, base = dataRoot, 
 export async function archive(state, base = dataRoot, execute = runOpenSpec) {
   if (state.kind !== 'change' || state.status !== 'completed' || !validChangeName(state.change)) throw new Error('completedのchangeだけアーカイブできます');
   try {
+    const problems = taskGate(state);
+    if (problems.length) throw new Error(`tasks.mdの確認に失敗しました:\n${problems.join('\n')}`);
     const output = await execute(openSpecRoot(state).root, ['archive', state.change, '-y', '--json', ...storeArgs(state)]);
     event(state, 'archived', { change: state.change, ...openSpecRoot(state), output }, base);
     close(state, 'archived', base);

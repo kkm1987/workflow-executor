@@ -47,6 +47,9 @@ test('検証とアーカイブは保存したルートとstoreを使い、イベ
   await assert.rejects(validatePrereview(state, result, [], async () => assert.fail(), { openspec: { changedFiles: ['openspec/config.yaml'] } }), /ディレクトリ外/);
   await assert.rejects(validatePrereview(state, result, [], async () => assert.fail()), /証拠/);
   state.status = 'completed';
+  const change = join(store, 'openspec', 'changes', state.change);
+  mkdirSync(change, { recursive: true });
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. 完了');
   await archive(state, base, async (cwd, args) => {
     assert.equal(cwd, store);
     assert.deepEqual(args, ['archive', 'sample', '-y', '--json', '--store', 'test-store']);

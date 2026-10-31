@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, validateResult, lock, prompt, summary, brief, list, dashboard } from '../src/workflow.js';
-import { step as nativeStep, run as nativeRun, codexArgs, runCodex, inputFor } from '../src/executor.js';
+import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, resolveInquiry, validateResult, lock, prompt, summary, brief, list, dashboard } from '../src/workflow.js';
+import { step as nativeStep, run as nativeRun, codexArgs, runCodex, inputFor, claudeArgs } from '../src/executor.js';
 import { attemptAssignment } from '../src/config.js';
 import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
+import { taskGate, archive } from '../src/changes.js';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
@@ -36,6 +37,77 @@ const revise = { report, returnTo: 'prereview', outcome: 'revise', summary: '空
 const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合' }];
 const prereviewResult = (approvals = []) => ({ ...ok([task]), change: 'sample-change', approvals,
   decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要' } });
+
+test('replanはexecute専用で、セッションを破棄し手戻りに数えない', t => {
+  const { state } = fixture(t);
+  const result = { ...ok(), outcome: 'replan' };
+  assert.ok(JSON.parse(readFileSync(join(root, 'src/result.schema.json'))).properties.outcome.enum.includes('replan'));
+  for (const stage of ['plan', 'prereview', 'review', 'acceptance']) assert.throws(() => validateResult(result, stage));
+  for (const kind of ['request', 'change']) {
+    Object.assign(state, { kind, stage: 'execute', revisions: 3, session: { sessionId: 'old' } });
+    advance(state, result);
+    assert.equal(state.stage, kind === 'change' ? 'prereview' : 'plan');
+    assert.equal(state.status, 'ready');
+    assert.equal(state.revisions, 3);
+    assert.equal(state.session, undefined);
+  }
+});
+
+test('検証の省略・変更の指示と根拠の回答番号を渡す', t => {
+  const { state, base } = fixture(t);
+  state.answers = [{ answer: '理由付きで省略する' }, { answer: '理由は？', inquiry: true }];
+  for (const [stage, patterns] of Object.entries({
+    execute: [/自らの判断で省略しない/, /tasks.mdと受け入れ条件を編集せずoutcome=replan/],
+    review: [/自らの判断で省略しない/, /検証が未実施ならrevise/],
+    prereview: [/省略（所有者の判断: 回答#<n>、<理由>）/, /配列の1始まり/, /タスクと受け入れ条件を新しい方法に書き換える/],
+    acceptance: [/実装をコードで確認/, /回答内容と照合/, /根拠のない省略があればrevise/, /report.verificationに未検証の項目と根拠の回答の番号/],
+  })) {
+    state.stage = stage;
+    for (const pattern of patterns) assert.match(prompt(state), pattern);
+  }
+  assert.deepEqual(summary(state, base, true).answers.map(value => value.number), [1, 2]);
+});
+
+test('taskGateは未チェックと不正な省略を返し、指定OpenSpecルートを読む', t => {
+  const { state, target } = fixture(t);
+  const change = join(target, 'spec-store', 'openspec', 'changes', 'sample');
+  mkdirSync(change, { recursive: true });
+  Object.assign(state, { kind: 'change', change: 'sample', openspec: { root: join(target, 'spec-store') }, answers: [{ answer: '省略する' }, { inquiry: true }] });
+  const lines = ['- [ ] 1. 未検証', '- [x] 2. 省略（所有者の判断: 回答#3、理由）', '- [x] 3. 省略（所有者の判断: 回答#2、理由）', '- [x] 4. 省略（所有者の判断: 回答#0、理由）'];
+  writeFileSync(join(change, 'tasks.md'), lines.join('\n'));
+  assert.deepEqual(taskGate(state), lines);
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. ~~実機検証~~ 省略（所有者の判断: 回答#1、理由）\n- [x] 2. 試験済み');
+  assert.deepEqual(taskGate(state), []);
+});
+
+test('acceptanceとarchiveはタスクの問題で完了を拒否し、読めなければfailed', async t => {
+  const { state, target, base } = fixture(t);
+  const change = join(target, 'openspec', 'changes', 'sample');
+  mkdirSync(change, { recursive: true });
+  Object.assign(state, { kind: 'change', change: 'sample', stage: 'acceptance', answers: [{ inquiry: true }, { answer: '続行' }] });
+  for (const line of ['- [ ] 1. 未検証', '- [x] 1. 省略（所有者の判断: 回答#1、理由）', '- [x] 1. 省略（所有者の判断: 回答#3、理由）']) {
+    writeFileSync(join(change, 'tasks.md'), line);
+    Object.assign(state, { stage: 'acceptance', status: 'ready', revisions: 0 });
+    await step(state, async () => ok(), base);
+    assert.equal(state.stage, 'prereview');
+    assert.equal(state.status, 'ready');
+    assert.equal(state.revisions, 1);
+    assert.ok(state.lastResult.includes(line));
+    state.status = 'completed';
+    await assert.rejects(archive(state, base, async () => assert.fail('OpenSpecを呼ばない')), /tasks.md/);
+    assert.equal(state.status, 'completed');
+  }
+  assert.match(readFileSync(join(base, state.id, 'events.jsonl'), 'utf8'), /archive_failed/);
+  writeFileSync(join(change, 'tasks.md'), '- [x] 1. 検証済み');
+  Object.assign(state, { status: 'ready', stage: 'acceptance' });
+  await step(state, async () => ok(), base);
+  assert.equal(state.status, 'completed');
+  rmSync(join(change, 'tasks.md'));
+  Object.assign(state, { status: 'ready', stage: 'acceptance' });
+  await step(state, async () => ok(), base);
+  assert.equal(state.status, 'failed');
+  assert.match(state.error, /tasks.md/);
+});
 
 test('短い要約は履歴数によらず報告と外部証拠を制限する', t => {
   const { state, base } = fixture(t);
@@ -67,7 +139,7 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     assert.equal(state.question, '元の質問');
     assert.deepEqual(state.permission, permission);
     assert.equal(state.grants, undefined);
-    assert.match(inputFor(state), /回答ではありません/);
+    assert.match(inputFor(state), /回答ではなく確認の質問/);
     assert.match(inputFor(state), /その判断の理由は？/);
     assert.ok(codexArgs(state, base).includes('resume'));
     const session = state.session;
@@ -79,7 +151,7 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     state.session = session;
     await step(state, async current => {
       assert.ok(codexArgs(current, base).includes('保存セッション'));
-      assert.match(inputFor(current), /回答ではありません/);
+      assert.match(inputFor(current), /回答ではなく確認の質問/);
       return { ...ok(), outcome: permission ? 'permission' : 'question',
         question: '判断の理由を説明。元の質問', ...(permission ? { permission } : {}) };
     }, base);
@@ -87,6 +159,95 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     assert.deepEqual(state.permission, permission);
   });
 }
+
+for (const outcome of ['ok', 'partial', 'revise', 'approval', 'question', 'permission']) {
+  test(`確認の質問の${outcome}は元の状態を保つ`, async t => {
+    const { state, base } = fixture(t);
+    Object.assign(state, { stage: 'execute', status: 'waiting', question: '元の質問',
+      tasks: [{ ...task, status: 'pending' }], permission: { network: true, paths: [base] },
+      approval: { status: 'approved', items: approvalItems }, partials: 2, revisions: 1, lastResult: '元の結果' });
+    state.session = { stage: state.stage, ...attemptAssignment(state), sessionId: '保存セッション' };
+    answer(state, '理由は？', base, true);
+    const preserved = ['question', 'permission', 'approval', 'stage', 'tasks', 'partials', 'revisions', 'lastResult'];
+    const before = structuredClone(state);
+    await step(state, async () => ({ outcome, question: ' 別の説明 ', summary: '要約', permission: { paths: [] } }), base);
+    for (const key of preserved) assert.deepEqual(state[key], before[key]);
+    assert.equal(state.status, 'waiting');
+    assert.equal(state.answers.at(-1).reply, '別の説明');
+    assert.equal(state.answers.at(-1).deviation, ['question', 'permission'].includes(outcome) ? undefined : outcome);
+    assert.equal(state.session.sessionId, '保存セッション');
+    const view = summary(state, base);
+    assert.equal(view.question, '元の質問');
+    assert.equal(view.inquiry.question, '理由は？');
+    assert.equal(brief(view).inquiry.reply, '別の説明');
+    answer(state, '通常の回答', base);
+    assert.equal(inputFor(state), '通常の回答');
+    assert.ok(codexArgs(state, base).includes('保存セッション'));
+    assert.ok(codexArgs(state, base).includes('sandbox_mode="workspace-write"'));
+  });
+}
+
+for (const stage of ['execute', 'prereview']) {
+  test(`${stage}の確認の質問は読み取り専用で工程の検証を呼ばない`, async t => {
+    const { state, base } = fixture(t);
+    Object.assign(state, { kind: 'change', change: 'sample-change', stage, status: 'waiting', question: '元の質問', grants: { network: true, paths: [base] } });
+    answer(state, '理由は？', base, true);
+    assert.equal(summary(state, base).inquiry, undefined);
+    for (const resumed of [false, true]) {
+      if (resumed) state.session = { stage, ...attemptAssignment(state), sessionId: '保存セッション' };
+      const codex = codexArgs(state, base);
+      assert.ok(codex.includes(resumed ? 'sandbox_mode="read-only"' : 'read-only'));
+      assert.ok(!codex.some(arg => /writable_roots|network_access/.test(arg)));
+      const claude = claudeArgs(state, '新規');
+      assert.equal(claude[claude.indexOf('--tools') + 1], 'Read,Glob,Grep');
+      assert.deepEqual(claude.slice(claude.indexOf('--allowedTools') + 1), ['Read', 'Glob', 'Grep']);
+      assert.ok(!claude.includes('--add-dir'));
+    }
+    await nativeStep(state, async () => ({ outcome: 'ok', summary: '説明' }), base, passed, async () => null,
+      async () => assert.fail('確認の質問では検証しない'));
+    assert.equal(state.status, 'waiting');
+    assert.equal(state.stage, stage);
+    assert.equal(state.answers.at(-1).reply, '説明');
+    state.answers.at(-1).reply = '長'.repeat(600);
+    assert.equal(brief(summary(state, base)).inquiry.reply.length, 500);
+  });
+}
+
+for (const kind of ['error', 'empty', 'invalid', 'exception', 'limited']) {
+  test(`確認の質問の失敗を記録する: ${kind}`, async t => {
+    const { state, base } = fixture(t);
+    Object.assign(state, { stage: 'execute', status: 'waiting', question: '元の質問', permission: { network: true, paths: [] } });
+    answer(state, '理由は？', base, true);
+    await step(state, async (current, dir) => {
+      if (kind === 'exception') {
+        writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: 'エラー時のセッション' }));
+        throw new Error('実行時エラー');
+      }
+      if (kind === 'limited') throw Object.assign(new Error('利用枠不足'), { limited: true });
+      if (kind === 'invalid') return null;
+      return { outcome: kind === 'error' ? 'error' : 'ok', summary: kind === 'empty' ? ' ' : 'エラーの説明' };
+    }, base);
+    assert.equal(state.status, kind === 'limited' ? 'limited' : 'waiting');
+    assert.equal(state.question, '元の質問');
+    assert.deepEqual(state.permission, { network: true, paths: [] });
+    assert.equal(state.failureStreak, undefined);
+    if (kind === 'exception') assert.equal(state.session.sessionId, 'エラー時のセッション');
+    if (kind !== 'limited') {
+      assert.ok(state.answers.at(-1).reply);
+      assert.equal(state.answers.at(-1).deviation, 'error');
+    }
+  });
+}
+
+test('確認の質問の説明は空のquestionならsummaryを使う', t => {
+  const { state, base } = fixture(t);
+  state.status = 'waiting';
+  answer(state, '理由は？', base, true);
+  resolveInquiry(state, { outcome: 'question', question: ' ', summary: '要約' });
+  assert.equal(state.answers.at(-1).reply, '要約');
+  state.status = 'ready';
+  assert.equal(summary(state, base).inquiry, undefined);
+});
 
 test('承認待ちへの確認の質問は保存状態も変更しない', t => {
   const { state, base } = fixture(t);

@@ -18,7 +18,7 @@ const MAX_PARTIALS = 10;
 
 export function validateResult(result, stage) {
   if (!stages.includes(stage)) throw new Error('工程が不正です');
-  if (!result || !['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval'].includes(result.outcome) ||
+  if (!result || !['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval', 'replan'].includes(result.outcome) ||
       typeof result.summary !== 'string' || !result.summary.trim() || typeof result.question !== 'string' ||
       !Array.isArray(result.tasks)) throw new Error('工程の応答形式が不正です');
   if (['question', 'permission'].includes(result.outcome) && !result.question.trim()) throw new Error('質問が空です');
@@ -27,7 +27,7 @@ export function validateResult(result, stage) {
       !Array.isArray(report.decisions) || report.decisions.some(value => typeof value !== 'string' || !value.trim())) {
     throw new Error('工程報告には対象・判断と理由・検証結果・残件が必要です');
   }
-  if (['partial', 'permission', 'approval'].includes(result.outcome) && stage !== 'execute') throw new Error('この工程では使えない結果です');
+  if (['partial', 'permission', 'approval', 'replan'].includes(result.outcome) && stage !== 'execute') throw new Error('この工程では使えない結果です');
   if (result.outcome === 'permission' && !result.permission?.network && !result.permission?.paths?.length) {
     throw new Error('権限要求にはネットワークまたはパスが必要です');
   }
@@ -74,6 +74,17 @@ export function sameScope(value, scope) {
   return value?.stage === scope.stage && value.task === scope.task;
 }
 
+export function resolveInquiry(state, result) {
+  const reply = (typeof result?.question === 'string' && result.question.trim()) ||
+    (typeof result?.summary === 'string' && result.summary.trim());
+  if (!reply) throw new Error('確認の質問の応答形式が不正です');
+  state.status = 'waiting';
+  const inquiry = state.answers.at(-1);
+  inquiry.reply = reply;
+  if (!['question', 'permission'].includes(result.outcome)) inquiry.deviation = result.outcome;
+  else delete inquiry.deviation;
+}
+
 export function advance(state, result) {
   validateResult(result, state.stage);
   state.lastResult = result.summary;
@@ -107,6 +118,11 @@ export function advance(state, result) {
     return;
   }
   delete state.partials;
+  if (result.outcome === 'replan') {
+    state.stage = state.kind === 'change' ? 'prereview' : 'plan';
+    state.status = 'ready';
+    return;
+  }
   if (['revise', 'approval'].includes(result.outcome)) {
     state.revisions += 1;
     state.status = state.revisions > 3 ? 'blocked' : 'ready';
@@ -173,7 +189,7 @@ export function list(base = dataRoot) {
     .map(path => JSON.parse(readFileSync(path, 'utf8')));
 }
 
-export function summary(state, base = dataRoot) {
+export function summary(state, base = dataRoot, detail = false) {
   const nextAction = {
     ready: 'エージェントが次の工程へ進めます',
     running: '実行中です。いま回答や判断は必要ありません',
@@ -203,9 +219,13 @@ export function summary(state, base = dataRoot) {
     total: state.tasks.length, nextAction, updatedAt: state.updatedAt,
   };
   result.latestReport = result.history.findLast(entry => entry.report) ?? null;
+  if (detail) result.answers = state.answers.map((answer, index) => ({ ...answer, number: index + 1 }));
   if (state.status === 'closed') result.closed = state.closed;
   if (state.status === 'waiting') {
     result.question = state.question;
+    const inquiry = state.answers.at(-1);
+    if (inquiry?.inquiry && inquiry.reply) result.inquiry = { question: inquiry.answer, reply: inquiry.reply,
+      ...(inquiry.deviation ? { deviation: inquiry.deviation } : {}) };
     if (state.approval?.status === 'pending') {
       result.approval = state.approval;
       result.nextAction = `承認計画の確認が必要です（${state.approval.items.length}件）`;
@@ -226,12 +246,13 @@ export function summary(state, base = dataRoot) {
 export function brief(view) {
   const keys = ['id', 'name', 'kind', 'change', 'status', 'statusLabel', 'stage', 'stageLabel',
     'completed', 'total', 'owner', 'nextAction', 'updatedAt', 'work', 'activity', 'activityLabel',
-    'question', 'approval', 'permission', 'error', 'rateLimits', 'result', 'artifact', 'verification', 'closed'];
+    'question', 'inquiry', 'approval', 'permission', 'error', 'rateLimits', 'result', 'artifact', 'verification', 'closed'];
   const result = Object.fromEntries(keys.filter(key => Object.hasOwn(view, key)).map(key => [key, view[key]]));
   const truncate = value => typeof value === 'string' ? value.slice(0, 500)
     : Array.isArray(value) ? value.map(truncate)
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, truncate(item)])) : value;
   result.latestReport = view.latestReport ? { attempt: view.latestReport.attempt, report: truncate(view.latestReport.report) } : null;
+  if (view.inquiry) result.inquiry = truncate(view.inquiry);
   result.externalEvidence = view.externalEvidence.map(({ name, valid, expiresAt }) => ({ name, valid, expiresAt }));
   return result;
 }
@@ -470,10 +491,10 @@ export function prompt(state, at = Date.now()) {
   const planning = ['plan', 'prereview'].includes(state.stage);
   const instruction = {
     plan: '要求整理→粒度判定→設計判定の順に行う。decisions.requirementsに要求と受け入れ条件の判断根拠、decisions.granularityに未完了タスクの粒度と順序の根拠、decisions.architectureに既存構成に基づく最も単純な設計の根拠を記す。差し戻し理由を反映し、検証可能な受け入れ条件を持つ未完了タスクを定義する。',
-    prereview: '作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する。候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。ユーザーの作業（ビルド、実機・手動確認、外部での承認や操作）が必要なタスクは、依存関係と検証可能性を損なわない範囲で、先行するソースコード変更をまとめてから一度に依頼する順序と粒度にする。承認計画の項目も同じ操作はまとめる。decisions.applicabilityにユーザーへの依頼回数とその根拠を書く。',
-    execute: 'targetのタスクだけを実装し、tasks.mdのチェック状態で対象を決めず、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。許可されるまで推測で回避しない。',
-    review: 'targetのタスクの実装だけを独立してレビューする。tasks.mdのチェック状態で対象を決めない。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
-    acceptance: '要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',
+    prereview: '検証の省略・変更は確認の質問を除く所有者の回答に基づく場合だけ記録する。answersの番号は配列の1始まり（回答#1が先頭）である。省略したタスクは - [x] <番号> ~~<元の記述>~~ 省略（所有者の判断: 回答#<n>、<理由>） とし、受け入れ条件から省略した検証を外す。検証方法の変更ではタスクと受け入れ条件を新しい方法に書き換える。作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する。候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。ユーザーの作業（ビルド、実機・手動確認、外部での承認や操作）が必要なタスクは、依存関係と検証可能性を損なわない範囲で、先行するソースコード変更をまとめてから一度に依頼する順序と粒度にする。承認計画の項目も同じ操作はまとめる。decisions.applicabilityにユーザーへの依頼回数とその根拠を書く。',
+    execute: '検証を自らの判断で省略しない。所有者が検証の省略・変更を回答したらtasks.mdと受け入れ条件を編集せずoutcome=replanとし、summaryに回答の要旨を書く。targetのタスクだけを実装し、tasks.mdのチェック状態で対象を決めず、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。許可されるまで推測で回避しない。',
+    review: '検証を自らの判断で省略しない。受け入れ条件の検証が未実施ならreviseとする。targetのタスクの実装だけを独立してレビューする。tasks.mdのチェック状態で対象を決めない。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
+    acceptance: '全仕様の差分の要件の実装をコードで確認する。検証は実施済みか、tasks.mdの省略の行が示す所有者の回答（確認の質問を除く）に基づく省略・変更だけを認め、回答内容と照合する。未実装または根拠のない省略があればreviseとする。合格ならreport.verificationに未検証の項目と根拠の回答の番号を列挙する。要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',
   }[state.stage];
   return `Workflow Executorの${state.stage}工程。${instruction}\n` +
     '対象のAGENTS.mdを守る。既存の無関係な変更を保持する。入力のapprovalで承認済みの項目の範囲を除き、コミット、push、公開、外部への送信はしない。plan・review・acceptance工程ではファイルを編集しない。' +
@@ -482,7 +503,7 @@ export function prompt(state, at = Date.now()) {
     (state.kind === 'change' ? '対象changeのproposal・仕様の差分・design・全tasksを読む。executeはtargetのタスクだけをapplyし、tasks.mdのチェック状態で対象を決めず、該当tasks.mdの完了状態を更新する。reviewもtargetの実装だけを独立確認し、tasks.mdのチェック状態で対象を決めない。acceptanceはタスク群1件でも必ず全仕様の差分・全タスクと実装・検証結果を照合し、工程間の不整合と無関係な変更を確認する。\n' : '') +
     'クライアントの判断が必要なら推測で進めずoutcome=questionとしてquestionに質問を書く。\n' +
     'questionは、他の資料を読まなくてもそれだけで判断できる文にする。判断が必要な理由、選択肢とそれぞれの影響（作業量・リスク・後戻りの可否）、推奨があれば推奨と理由を含める。permissionでは必要な理由と許可しない場合の影響を書く。\n' +
-    'answersの最後がinquiryなら回答ではなく確認の質問である。作業を進めず、判断の理由を説明し、元の質問・権限要求を保ったまま同じoutcome=question（権限要求ならpermission）で返す。\n' +
+    'answersの最後がinquiryなら回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' +
     '実行環境やツールのエラーで作業できない場合はoutcome=error、question=""とし、summaryに具体的なエラーを書く。環境エラーをクライアントへの仕様質問にしない。\n' +
     'failuresは直前の失敗です。同じ手順を繰り返さず、解消できなければoutcome=errorで原因を具体的に報告する。\n' +
     '実行器のデータやログを対象に作らない。最終応答は指定JSONスキーマのみ。summaryは結論を簡潔に記す。作業中は内部思考やコマンド全文を含めず、対象と進行状況を短く報告する。\n' +
