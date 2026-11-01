@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { activity, eventStream } from '../src/activity.js';
 import { root, create, summary, save, validateResult, prompt, setModel, answer } from '../src/workflow.js';
 import { step, runAgent } from '../src/executor.js';
+import { fakeCodex } from './fixtures/codex.js';
 
 const report = { scope: 'sample.txt / 正常を含む', decisions: [], verification: '未検証', remaining: '読み取り確認' };
 const result = { returnTo: 'none', outcome: 'ok', summary: '確認', question: '', tasks: [], report };
@@ -121,10 +122,8 @@ test('旧履歴はsummaryを残して未記録を示し、Markdownをエスケ�
 test('実プロセス: 元ログ保存・活動更新・終了前の10秒保存・失敗・ログ保存不能', async t => {
   const { state, base, target } = fixture(t);
   const fake = join(target, 'fake.cjs');
-  writeFileSync(fake, `const fs = require('node:fs'); process.stdin.resume(); process.stdin.on('end', () => {
-    console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'日本語の確認中'}}));
-    setTimeout(() => { const args = process.argv; fs.writeFileSync(args[args.indexOf('-o')+1], ${JSON.stringify(JSON.stringify(result))}); }, 11000);
-  });`);
+  fakeCodex(fake, `notify('item/completed', {item:{id:'report',type:'agentMessage',text:'日本語の確認中'}});
+    setTimeout(() => finish(${JSON.stringify(result)}), 11000);`);
   const running = checked(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base);
   await new Promise(resolve => setTimeout(resolve, 100));
   const before = readFileSync(join(base, 'dashboard.md'), 'utf8');
@@ -179,13 +178,14 @@ test('Claude実出力fixture: 最終result・usage・modelUsage・session_id・�
 test('Codexの中断は取得済み元ログと最新活動を保持する', async t => {
   const { state, dir, target } = fixture(t);
   const fake = join(target, 'wait.cjs');
-  writeFileSync(fake, `console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'中断前の活動'}}));setInterval(()=>{},1000);`);
+  fakeCodex(fake, `notify('item/completed', {item:{id:'report',type:'agentMessage',text:'中断前の活動'}});setInterval(()=>{},1000);`);
   const attempt = join(dir, 'attempt');
   mkdirSync(attempt);
   const running = runAgent(state, attempt, process.execPath, [fake]);
   const stop = setInterval(() => { if (state.activity) { clearInterval(stop); process.emit('SIGTERM'); } }, 20);
   try { await assert.rejects(running, /中断/); } finally { clearInterval(stop); }
   assert.match(readFileSync(join(attempt, 'codex.jsonl'), 'utf8'), /中断前の活動/);
+  assert.match(readFileSync(join(attempt, 'codex-rpc.jsonl'), 'utf8'), /turn\/interrupt/);
   assert.equal(JSON.parse(readFileSync(join(attempt, 'invocation.json'))).activity.text, '中断前の活動');
 });
 

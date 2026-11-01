@@ -7,6 +7,7 @@ import { root, create, load, setModel, setFallback, save, answer, retry, summary
 import { assignment, attemptAssignment, fallbackAssignment, readConfig, validateAssignments } from '../src/config.js';
 import { step, run, runAgent, inputFor, resumeSession, codexArgs, claudeArgs } from '../src/executor.js';
 import { preflight, checkGrantAccess } from '../src/preflight.js';
+import { fakeCodex } from './fixtures/codex.js';
 
 const codex = { model: 'gpt-6-luna', effort: 'high' };
 const claude = { model: 'claude-opus-5-5', effort: 'medium' };
@@ -160,8 +161,11 @@ test('模擬CLIの代替起動は引数・入力・invocation・metrics・status
     const state = create(target, '入力を渡す', base, undefined, { models: { plan: normal }, fallbacks: { plan: fallback } });
     const fake = join(dir, `fake-${fallback.model}.cjs`);
     const cli = fallback === claude ? 'claude' : 'codex';
-    writeFileSync(fake, `
-      const fs = require('node:fs');
+    if (cli === 'codex') fakeCodex(fake, `
+      if (!process.argv.includes(${JSON.stringify(`model=${JSON.stringify(fallback.model)}`)})) process.exit(2);
+      if (!input.includes('入力を渡す') || message.params.threadId !== 'fake') process.exit(3);
+      finish(${JSON.stringify(ok)});`);
+    else writeFileSync(fake, `
       const args = process.argv.slice(2);
       if (!args.includes(${JSON.stringify(fallback.model)})) process.exit(2);
       let input = '';
@@ -169,11 +173,7 @@ test('模擬CLIの代替起動は引数・入力・invocation・metrics・status
       process.stdin.on('end', () => {
         if (!input.includes('入力を渡す')) process.exit(3);
         const result = ${JSON.stringify(ok)};
-        if (${JSON.stringify(cli)} === 'claude') console.log(JSON.stringify({ type: 'result', session_id: 'fake', structured_output: result }));
-        else {
-          fs.writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(result));
-          console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fake' }));
-        }
+        console.log(JSON.stringify({ type: 'result', session_id: 'fake', structured_output: result }));
       });
     `);
     await step(state, (current, attemptDir) => runAgent(current, attemptDir, process.execPath, [fake]), base, passed,
@@ -224,10 +224,10 @@ test('選択CLIの権限確認と双方向の引数は承認・許可・工程�
       Object.assign(state, { kind: 'change', change: 'sample', stage, models: { [stage]: normal }, attemptAssignment: { ...fallback, cli: fallback === codex ? 'codex' : 'claude' } });
       const value = attemptAssignment(state);
       const args = value.cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, 'new');
-      assert.ok(args.includes(fallback.model));
+      assert.ok(args.includes(fallback.model) || args.includes(`model=${JSON.stringify(fallback.model)}`));
       assert.match(inputFor(state), /条件を保持/);
       if (value.cli === 'codex') {
-        assert.ok(args.includes(stage === 'review' ? 'read-only' : 'workspace-write'));
+        assert.ok(args.includes(`sandbox_mode="${stage === 'review' ? 'read-only' : 'workspace-write'}"`));
         assert.ok(args.includes('approval_policy="never"'));
       } else {
         assert.ok(args.includes('dontAsk'));

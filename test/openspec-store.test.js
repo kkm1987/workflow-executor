@@ -8,6 +8,7 @@ import { startChange, archive, validatePrereview, runOpenSpec } from '../src/cha
 import { preflight } from '../src/preflight.js';
 import { step, run, runAgent, codexArgs, claudeArgs } from '../src/executor.js';
 import { snapshot } from '../src/evidence.js';
+import { fakeCodex } from './fixtures/codex.js';
 
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'store-test-'));
@@ -152,7 +153,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
       : current.stage === 'execute'
         ? `fs.writeFileSync(${JSON.stringify(join(target, 'greet.txt'))}, 'Hello'); fs.writeFileSync(${JSON.stringify(join(change, 'tasks.md'))}, '- [x] 1. 挨拶を実装する\\n');`
         : '';
-    writeFileSync(fake, `const fs = require('node:fs'); process.stdin.resume(); process.stdin.on('end', () => { ${edits} fs.writeFileSync(process.argv[process.argv.indexOf('-o') + 1], ${JSON.stringify(JSON.stringify(result))}); });`);
+    fakeCodex(fake, `${edits} finish(${JSON.stringify(result)});`);
     return runAgent(current, attempt, process.execPath, [fake]);
   };
   await run(state, runner, base, undefined, current => preflight(current, async (command, args, cwd) => {
@@ -179,7 +180,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   // 同一ルートは従来の証拠形式を保つ。
   state.openspec.root = target; state.openspec.store = null; state.stage = 'execute'; state.attempts++;
   const attempt = join(dir, 'same-root'); mkdirSync(attempt);
-  writeFileSync(fake, `const fs = require('node:fs'); process.stdin.resume(); process.stdin.on('end', () => fs.writeFileSync(process.argv[process.argv.indexOf('-o') + 1], '{}'));`);
+  fakeCodex(fake, 'finish({});');
   await runAgent(state, attempt, process.execPath, [fake]);
   assert.equal(state.evidence.at(-1).openspec, undefined);
 });

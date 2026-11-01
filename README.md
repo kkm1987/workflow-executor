@@ -4,7 +4,7 @@
 
 ## 起動
 
-Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
+Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。Codexの新規実行・セッション再開は`codex app-server`のstdio JSON-RPCを使い、承認方針は`never`、承認要求の送信先は`user`に固定する。届いた承認要求は拒否する。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
 
 ### クローン後のセットアップ
 
@@ -72,7 +72,7 @@ changeの実行前レビューは、未完了タスク全体の承認計画（�
 
 ダッシュボードは回答待ち、利用枠不足、復旧・再計画待ち、成果確認可能、進行中の順にまとめ、詳細に停止理由・質問・成果と検証へのリンクを置く。工程報告の`report`には対象、判断と理由、検証結果、残件を記録する。判断なしは空配列、未検証と残件なしは明記する。履歴の担当・対象は次タスクやモデル変更後も保持し、失敗時は報告を補わずログを参照する。旧履歴はsummaryを表示し、追加項目は未記録とする。検証の省略・変更の回答はexecuteの`replan`でprereview（自由記述ではplan）へ戻して計画に反映し、手戻りに数えない。省略はtasks.mdに所有者の回答番号と理由を記録する。changeの完了・アーカイブ前には未チェックのタスクと省略の回答番号を確認し、存在しない回答や確認の質問への参照を拒否する。完了とアーカイブの報告では、最終確認の`report.verification`から未検証の項目と根拠の回答番号を示す。回答番号は`status <ID> --detail`の`answers`で確認できる。完了はクライアントの承認を意味しない。状態ファイルと表示用要約の活動は実行中に10秒ごとに更新される。Markdownは工程境界や`status`で作り直し、詳細は最新3試行と全記録へのリンクを表示する。閲覧中のエディターが自動再読み込みしない場合は再度開く。
 
-`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。元ストリームは`codex.jsonl`または`claude.jsonl`、Claudeの最終resultは従来どおり`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。OpenSpecのルートが別の場所にある場合は、証拠の`openspec`にルート・storeと`openspec/`配下の前後記録・変更ファイルを別に保存する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
+`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。Codexの通知は従来のexec形式へ変換して`codex.jsonl`に、RPCの送受信全行は方向付きで`codex-rpc.jsonl`に保存し、最後のagentMessageを`response.json`に残す。Claudeの元ストリームは`claude.jsonl`、最終resultは`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。OpenSpecのルートが別の場所にある場合は、証拠の`openspec`にルート・storeと`openspec/`配下の前後記録・変更ファイルを別に保存する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
 
 Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions/`（未指定なら`~/.codex/sessions/`）へ保存する。開発対象には保存しない。直近の質問の工程・CLI・モデル・推論レベル・セッションIDだけを状態に保持し、一致する場合は回答だけを渡して再開する。不一致・再開失敗・retryは回答を含む新規コンテキストに戻し、工程が進めばセッションを捨てる。`kind`のない旧状態はrequestとして読み、completedの記録は書き換えない。
 

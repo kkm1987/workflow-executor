@@ -6,7 +6,7 @@ import { root, create, load, setModel, answer, retry, advance, summary, save } f
 import { readConfig, validateModel, assignment } from '../src/config.js';
 import { startChange, archive, validatePrereview } from '../src/changes.js';
 import { resolveCodex } from '../src/commands.js';
-import { codexArgs, claudeArgs, runAgent, step, run, resumeSession, inputFor } from '../src/executor.js';
+import { codexArgs, codexThread, claudeArgs, runAgent, step, run, resumeSession, inputFor } from '../src/executor.js';
 import { preflight, checkGrantAccess } from '../src/preflight.js';
 import { parseCodexLimits, parseClaudeLimits, insufficient, limitError } from '../src/limits.js';
 import { usage, performanceReport } from '../src/metrics.js';
@@ -42,11 +42,11 @@ test('Windowsの全起動経路はelevatedを要求し、他の環境には設�
           state.session = resumed ? { stage, ...assignment(state), sessionId: 'old' } : undefined;
           const args = codexArgs(state, base);
           verify(args);
-          assert.equal(args.includes('resume'), resumed);
+          assert.equal(Boolean(codexThread(state).threadId), resumed);
           assert.ok(args.includes('approval_policy="never"'));
           assert.equal(args.includes('sandbox_workspace_write.network_access=true'), ['execute', 'prereview'].includes(stage));
           assert.equal(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base])}`), ['execute', 'prereview'].includes(stage));
-          assert.ok(args.includes(resumed ? `sandbox_mode="${['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only'}"` : ['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only'));
+          assert.equal(codexThread(state).sandbox, ['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only');
           assert.ok(!claudeArgs(state, 'new').some(arg => /prefer_mxc|windows\.sandbox/.test(arg)));
         }
       }
@@ -184,11 +184,12 @@ test('Codexの新規と再開引数は割り当てと読み取り専用を保持
   setModel(state, 'review', 'gpt-6-luna', 'high', base);
   let args = codexArgs(state, base);
   assert.ok(!args.includes('--ephemeral'));
-  assert.equal(args[args.indexOf('-m') + 1], 'gpt-6-luna');
+  assert.equal(codexThread(state).model, 'gpt-6-luna');
   assert.ok(args.includes('model_reasoning_effort="high"'));
   state.session = { stage: 'review', ...assignment(state), sessionId: 'thread-1' };
   args = codexArgs(state, base);
-  assert.deepEqual(args.slice(0, 3), ['exec', 'resume', 'thread-1']);
+  assert.equal(args[0], 'app-server');
+  assert.equal(codexThread(state).threadId, 'thread-1');
   assert.ok(args.includes('sandbox_mode="read-only"'));
   assert.ok(!args.includes('--sandbox'));
 });
@@ -279,7 +280,7 @@ test('承認計画への回答は同じ担当のセッションへ説明と回�
     assert.equal(inputFor(state), expected);
     const args = () => assignment(state).cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, '新規');
     const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';
-    assert.equal(args()[args().indexOf(resumeFlag) + 1], saved.sessionId);
+    assert.equal(assignment(state).cli === 'codex' ? codexThread(state).threadId : args()[args().indexOf(resumeFlag) + 1], saved.sessionId);
     for (const changed of [
       { cli: saved.cli === 'codex' ? 'claude' : 'codex' }, { model: '別モデル' }, { effort: 'low' },
       { externalEvidence: [{ id: 1, valid: true }] },

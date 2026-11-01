@@ -12,8 +12,15 @@ import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, t
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
+import { codexSession } from './codex-app-server.js';
 
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
+
+function writeAll(handle, value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  let offset = 0;
+  while (offset < bytes.length) offset += writeSync(handle, bytes, offset);
+}
 
 export function resumeSession(state) {
   const value = attemptAssignment(state);
@@ -30,22 +37,28 @@ export function inputFor(state) {
   return (last.approval ? '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\n' : '') + last.answer;
 }
 
-export function codexArgs(state, dir) {
+export function codexSandbox(state) {
+  return !state.answers.at(-1)?.inquiry && ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
+}
+
+export function codexThread(state) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
-  const mode = !state.answers.at(-1)?.inquiry && ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
+  return { cwd: state.target, sandbox: codexSandbox(state), approvalPolicy: 'never', approvalsReviewer: 'user',
+    ...(value.model ? { model: value.model } : {}), ...(session ? { threadId: session.sessionId } : {}) };
+}
+
+export function codexArgs(state) {
+  const value = attemptAssignment(state);
+  const mode = codexSandbox(state);
   const paths = [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
-  return ['exec', ...(session ? ['resume', session.sessionId] : []), '--json',
-    ...(!session ? ['--color', 'never', '-C', state.target] : []),
-    ...(value.model ? ['-m', value.model] : []),
+  return ['app-server',
+    ...(value.model ? ['-c', `model=${JSON.stringify(value.model)}`] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
     ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
-    ...(session ? ['-c', `sandbox_mode="${mode}"`] : ['--sandbox', mode]),
-    '-c', 'approval_policy="never"',
-    '--output-schema', schemaPath(state),
-    '-o', join(dir, 'response.json'), '-'];
+    '-c', `sandbox_mode="${mode}"`, '-c', 'approval_policy="never"', '-c', 'approvals_reviewer="user"'];
 }
 
 export function claudeArgs(state, sessionId) {
@@ -83,6 +96,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
   writeFileSync(join(dir, 'prompt.txt'), input);
   let stdout;
   let stderr;
+  let rpc;
   let failure;
   let finalOutput;
   const tools = new Map();
@@ -97,15 +111,19 @@ async function invokeAgent(state, dir, command, prefix = []) {
   try {
     stdout = openSync(join(dir, value.cli === 'codex' ? 'codex.jsonl' : 'claude.jsonl'), 'w');
     stderr = openSync(join(dir, 'stderr.log'), 'w');
+    if (value.cli === 'codex') rpc = openSync(join(dir, 'codex-rpc.jsonl'), 'w');
     await new Promise((resolve, reject) => {
       const args = value.cli === 'codex' ? codexArgs(state, dir) : claudeArgs(state, sessionId);
       const child = spawnCommand(command, [...prefix, ...args], {
         cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true,
       });
       let interrupted = false;
-      const stop = () => {
-        interrupted = true;
+      let killed = false;
+      let shutdownTimer;
+      let session;
+      const kill = () => {
         if (!child.pid) return;
+        killed = true;
         if (process.platform === 'win32') {
           // Stop the process tree so a tool cannot keep editing after interruption.
           const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -113,32 +131,53 @@ async function invokeAgent(state, dir, command, prefix = []) {
           killer.once('exit', code => { if (code !== 0) child.kill(); });
         } else child.kill('SIGTERM');
       };
+      const stop = () => {
+        interrupted = true;
+        failure ??= new Error('実行が中断されました。対象の変更を確認してからretryしてください');
+        if (session) {
+          try { session.interrupt(); } catch (error) { failure ??= error; }
+          shutdownTimer ??= setTimeout(kill, 1000);
+        } else kill();
+      };
+      const fail = error => { failure ??= error; kill(); };
+      if (value.cli === 'codex') session = codexSession(child, {
+        thread: codexThread(state),
+        turn: { input: [{ type: 'text', text: input }], outputSchema: JSON.parse(readFileSync(schemaPath(state), 'utf8')),
+          ...(value.effort ? { effort: value.effort } : {}) },
+        emit: entry => { const line = Buffer.from(JSON.stringify(entry) + '\n'); writeAll(stdout, line); receive(line); },
+        raw: (direction, line) => writeAll(rpc, JSON.stringify({ direction, line }) + '\n'),
+        output: text => writeFileSync(join(dir, 'response.json'), text),
+        complete: () => { child.stdin.end(); shutdownTimer ??= setTimeout(kill, 1000); }, fail,
+      });
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);
       child.stdout.on('data', chunk => {
         try {
+          if (session) { session.receive(chunk); return; }
           // 同期保存で次のチャンクを待たせ、未保存データを蓄積しない。
-          let offset = 0;
-          while (offset < chunk.length) offset += writeSync(stdout, chunk, offset);
+          writeAll(stdout, chunk);
           receive(chunk);
-        } catch (error) { failure ??= error; stop(); }
+        } catch (error) { fail(error); }
       });
       child.stdout.on('error', error => { failure ??= error; stop(); });
       child.once('error', reject);
-      child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
+      child.stdin.on('error', error => { if (error.code !== 'EPIPE') fail(error); });
       child.once('close', code => {
+        clearTimeout(shutdownTimer);
         process.removeListener('SIGINT', stop);
         process.removeListener('SIGTERM', stop);
+        try { session?.end(); } catch (error) { failure ??= error; }
         if (interrupted) reject(new Error('実行が中断されました。対象の変更を確認してからretryしてください'));
-        else if (code !== 0) reject(new Error(`${value.cli} CLIが終了コード${code}で失敗しました。stderr.logを確認してください`));
+        else if ((session && !session.finished) || (code !== 0 && !killed)) reject(new Error(`${value.cli} CLIが終了コード${code}で失敗しました。stderr.logを確認してください`));
         else resolve();
       });
-      child.stdin.end(input);
+      if (session) { try { session.start(); } catch (error) { fail(error); } }
+      else child.stdin.end(input);
     });
   } catch (error) {
     failure ??= error;
   } finally {
-    for (const handle of [stdout, stderr]) {
+    for (const handle of [stdout, stderr, rpc]) {
       if (handle !== undefined) { try { closeSync(handle); } catch (error) { failure ??= error; } }
     }
   }
@@ -160,7 +199,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
   } catch (error) { failure ??= error; }
   writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...metadata, activity: state.activity ?? null }, null, 2));
   if (failure) {
-    const logs = [value.cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl', 'stderr.log'].map(file => {
+    const logs = [...(value.cli === 'claude' ? ['claude.jsonl'] : ['codex.jsonl', 'codex-rpc.jsonl']), 'stderr.log'].map(file => {
       try { return readFileSync(join(dir, file), 'utf8'); } catch { return ''; }
     }).join('\n');
     if (limitError(logs)) failure.limited = true;

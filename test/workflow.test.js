@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, resolveInquiry, validateResult, lock, prompt, summary, brief, list, dashboard } from '../src/workflow.js';
-import { step as nativeStep, run as nativeRun, codexArgs, runCodex, inputFor, claudeArgs } from '../src/executor.js';
+import { step as nativeStep, run as nativeRun, codexArgs, codexThread, runCodex, inputFor, claudeArgs } from '../src/executor.js';
+import { fakeCodex } from './fixtures/codex.js';
 import { attemptAssignment } from '../src/config.js';
 import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
@@ -141,7 +142,7 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     assert.equal(state.grants, undefined);
     assert.match(inputFor(state), /回答ではなく確認の質問/);
     assert.match(inputFor(state), /その判断の理由は？/);
-    assert.ok(codexArgs(state, base).includes('resume'));
+    assert.equal(codexThread(state).threadId, '保存セッション');
     const session = state.session;
     delete state.session;
     assert.match(inputFor(state), /answersの最後がinquiry/);
@@ -150,7 +151,7 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     assert.deepEqual(context.permission, permission);
     state.session = session;
     await step(state, async current => {
-      assert.ok(codexArgs(current, base).includes('保存セッション'));
+      assert.equal(codexThread(current).threadId, '保存セッション');
       assert.match(inputFor(current), /回答ではなく確認の質問/);
       return { ...ok(), outcome: permission ? 'permission' : 'question',
         question: '判断の理由を説明。元の質問', ...(permission ? { permission } : {}) };
@@ -182,7 +183,7 @@ for (const outcome of ['ok', 'partial', 'revise', 'approval', 'question', 'permi
     assert.equal(brief(view).inquiry.reply, '別の説明');
     answer(state, '通常の回答', base);
     assert.equal(inputFor(state), '通常の回答');
-    assert.ok(codexArgs(state, base).includes('保存セッション'));
+    assert.equal(codexThread(state).threadId, '保存セッション');
     assert.ok(codexArgs(state, base).includes('sandbox_mode="workspace-write"'));
   });
 }
@@ -196,7 +197,7 @@ for (const stage of ['execute', 'prereview']) {
     for (const resumed of [false, true]) {
       if (resumed) state.session = { stage, ...attemptAssignment(state), sessionId: '保存セッション' };
       const codex = codexArgs(state, base);
-      assert.ok(codex.includes(resumed ? 'sandbox_mode="read-only"' : 'read-only'));
+      assert.ok(codex.includes('sandbox_mode="read-only"'));
       assert.ok(!codex.some(arg => /writable_roots|network_access/.test(arg)));
       const claude = claudeArgs(state, '新規');
       assert.equal(claude[claude.indexOf('--tools') + 1], 'Read,Glob,Grep');
@@ -774,11 +775,10 @@ test('実装のみ書き込み可能で、質問セッションがなければ�
   for (const stage of ['plan', 'execute', 'review', 'acceptance']) {
     state.stage = stage;
     const args = codexArgs(state, base);
-    assert.equal(args[0], 'exec');
-    assert.equal(args[args.indexOf('--sandbox') + 1], stage === 'execute' ? 'workspace-write' : 'read-only');
+    assert.equal(args[0], 'app-server');
+    assert.equal(codexThread(state).sandbox, stage === 'execute' ? 'workspace-write' : 'read-only');
     assert.ok(!args.includes('--ephemeral'));
-    assert.ok(args.includes('--output-schema'));
-    assert.ok(!args.includes('resume'));
+    assert.ok(!codexThread(state).threadId);
     assert.ok(!args.includes('--dangerously-bypass-approvals-and-sandbox'));
   }
 });
@@ -793,16 +793,10 @@ test('空要求、不正ID、対象外の回答を拒否する', t => {
 test('CLI接続はstdinを渡し、応答とイベント・標準エラーを別に保存する', async t => {
   const { state, base, target } = fixture(t);
   const fake = join(target, 'fake.cjs');
-  writeFileSync(fake, `const fs = require('node:fs');
-    let input = ''; process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => input += chunk);
-    process.stdin.on('end', () => {
-      const args = process.argv.slice(2);
+  fakeCodex(fake, `
       if (!input.includes('入力を検証して保存する')) process.exit(2);
-      fs.writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(${JSON.stringify(ok([task]))}));
-      console.log(JSON.stringify({ type: 'turn.completed' }));
       console.error('進捗');
-    });`);
+      finish(${JSON.stringify(ok([task]))});`);
   await step(state, (current, dir) => runCodex(current, dir, process.execPath, [fake]), base);
   assert.equal(state.status, 'ready');
   assert.equal(state.stage, 'execute');
@@ -907,13 +901,9 @@ test('実装の実行で記録した変更ファイルが保存され、次の�
   const { state, base, target } = fixture(t);
   execFileSync('git', ['init', '--quiet', target]);
   const fake = join(target, 'execute.cjs');
-  writeFileSync(fake, `const fs = require('node:fs');
-    process.stdin.resume();
-    process.stdin.on('end', () => {
-      const args = process.argv.slice(2);
+  fakeCodex(fake, `
       fs.writeFileSync('feature.js', 'export const feature = true;');
-      fs.writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(${JSON.stringify(ok())}));
-    });`);
+      finish(${JSON.stringify(ok())});`);
   state.stage = 'execute';
   state.tasks = [{ ...task, status: 'pending' }];
   await step(state, (current, dir) => runCodex(current, dir, process.execPath, [fake]), base);
