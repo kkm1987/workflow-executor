@@ -121,7 +121,7 @@ test('回答時の変更・失効は完全入力へ戻し、変更がなけれ�
 test('隔離runner: 失敗→登録→retry→元ファイルなしでpromptを受領し試行へ識別子を保存', async t => {
   const { state, path, base } = fixture(t);
   const check = async () => ({ ok: true });
-  const limits = async () => null;
+  const limits = async () => ({ limits: null, failure: null });
   await step(state, async () => { throw new Error('測定値を読めないサンドボックス'); }, base, check, limits);
   assert.equal(state.status, 'failed');
   registerEvidence(state, path, base);

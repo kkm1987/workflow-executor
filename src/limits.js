@@ -40,7 +40,7 @@ export function codexLimits(command, cwd, timeout = 15_000) {
     const send = value => child.stdin.write(JSON.stringify(value) + '\n');
     child.on('error', error => finish(error));
     child.stdin.on('error', error => finish(error));
-    child.on('close', () => finish(new Error('利用枠取得中に終了')));
+    child.on('close', code => finish(Object.assign(new Error(`利用枠取得中に終了: ${code}`), { code: code ?? 1 })));
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => {
       pending += chunk;
@@ -61,11 +61,25 @@ export function codexLimits(command, cwd, timeout = 15_000) {
   });
 }
 
-export async function rateLimits(state, value) {
+export async function rateLimits(state, value, read = capture, probe = codexLimits) {
+  const started = performance.now();
   try {
-    if (value.cli === 'claude') return parseClaudeLimits(await capture(state.executables?.claude ?? 'claude', ['-p', '/usage', '--output-format', 'json'], state.target));
-    return await codexLimits(state.executables?.codex ?? resolveCodex(), state.target);
-  } catch { return null; }
+    const limits = value.cli === 'claude'
+      ? parseClaudeLimits(await read(state.executables?.claude ?? 'claude', ['-p', '/usage', '--output-format', 'json', '--safe-mode'], state.target, 30_000))
+      : await probe(state.executables?.codex ?? resolveCodex(), state.target);
+    return { limits, failure: limits ? null : { reason: 'parse', elapsedMs: performance.now() - started, detail: '' } };
+  } catch (error) {
+    const reason = error.killed || error.message === '利用枠取得タイムアウト' ? 'timeout' : typeof error.code === 'number' || error.message === '利用枠の初期化失敗' ? 'exit' : 'spawn';
+    return { limits: null, failure: { reason, elapsedMs: performance.now() - started, detail: String(error.stderr || error.message).slice(0, 200) } };
+  }
+}
+
+export function rateLimitsFailures(selection) {
+  return [['normal', '通常側'], ['fallback', '代替']].flatMap(([key, label]) => {
+    const candidate = selection?.[key];
+    const failure = candidate?.rateLimitsFailure;
+    return failure ? [`${label}${candidate.cli === 'claude' ? 'Claude' : 'Codex'}: ${{ timeout: 'タイムアウト', exit: '異常終了', spawn: '起動失敗', parse: '解析失敗' }[failure.reason]} ${(failure.elapsedMs / 1000).toFixed(1)}秒`] : [];
+  }).join('・');
 }
 
 export function insufficient(limits, minimum) {

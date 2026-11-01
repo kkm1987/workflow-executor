@@ -1,3 +1,4 @@
+import { rateLimitsFailures } from './limits.js';
 import { randomUUID } from 'node:crypto';
 import { withSharedLock, atomicWrite } from './locking.js';
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, existsSync, openSync, closeSync, unlinkSync, realpathSync, statSync } from 'node:fs';
@@ -332,7 +333,7 @@ function dashboardLocked(base, { config, launch, at } = {}) {
       }
       if (state.kind === 'change') lines.push('', `change: ${cell(state.change ?? '選定待ち')}`);
       for (const entry of view.externalEvidence) lines.push('', `証拠 ${cell(entry.name)} (#${entry.id}): ${cell(entry.subject)} / ${cell(entry.host)} / 測定 ${cell(entry.observedAt)} / 期限 ${cell(entry.expiresAt)} / ${entry.valid ? '有効' : '期限切れ・再測定・再登録が必要'} / 出典 ${cell(entry.source)} / [保存内容](${state.id}/state.json#externalEvidence/${entry.id})`);
-      if (state.status === 'limited') lines.push('', `利用枠: ${cell(JSON.stringify(state.rateLimits))}`, '', cell(view.nextAction));
+      if (state.status === 'limited') lines.push('', `利用枠: ${cell(JSON.stringify(state.rateLimits))}${rateLimitsFailures(state.selection) ? ` / ${cell(rateLimitsFailures(state.selection))}` : ''}`, '', cell(view.nextAction));
       if (state.status === 'waiting') lines.push('', `停止理由: ${cell(state.lastResult)}`, '', `質問: ${cell(state.question)}`);
       if (view.approval) for (const item of view.approval.items) lines.push('', `承認対象: ${cell(item.tasks)} / 操作: ${cell(item.action)} / 上限: ${cell(item.limits)} / 停止条件: ${cell(item.stopWhen)}`);
       if (state.status === 'failed') lines.push('', `停止理由: ${cell(state.error)}`);

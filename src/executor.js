@@ -9,7 +9,7 @@ import { usage, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
 import { resolveCodex, spawnCommand } from './commands.js';
 import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, taskGate } from './changes.js';
-import { rateLimits, insufficient, limitError } from './limits.js';
+import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
 
@@ -249,11 +249,15 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   if (!sameScope(state.envFallback, scope)) delete state.envFallback;
   const envFallback = sameScope(state.envFallback, scope);
   let value = normal;
-  let beforeLimits = await limits(state, normal);
+  const normalResult = await limits(state, normal);
+  let beforeLimits = normalResult.limits;
   const selection = { stage: state.stage, normal: { ...normal, rateLimits: beforeLimits }, fallback: fallback ? { ...fallback, rateLimits: null } : null,
     reason: beforeLimits ? '通常側の利用枠が十分' : '通常側の利用枠が未取得', selected: normal };
+  if (normalResult.failure) selection.normal.rateLimitsFailure = normalResult.failure;
   if (envFallback || insufficient(beforeLimits, config.limits[state.stage])) {
-    const alternative = fallback ? await limits(state, fallback) : null;
+    const alternativeResult = fallback ? await limits(state, fallback) : null;
+    const alternative = alternativeResult?.limits;
+    if (alternativeResult?.failure) selection.fallback.rateLimitsFailure = alternativeResult.failure;
     if (fallback) selection.fallback.rateLimits = alternative;
     if (fallback && (alternative?.primary || alternative?.secondary) && !insufficient(alternative, config.limits[state.stage])) {
       value = fallback; beforeLimits = alternative;
@@ -269,7 +273,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   state.rateLimits = beforeLimits;
   if (!selection.selected) {
     state.status = 'limited';
-    state.error = `${selection.reason}。別モデルへの変更、またはリセット待ち後にretryしてください`;
+    state.error = `${selection.reason}${rateLimitsFailures(selection) ? `（${rateLimitsFailures(selection)}）` : ''}。別モデルへの変更、またはリセット待ち後にretryしてください`;
     delete state.session;
     event(state, 'limited', { ...value, rateLimits: beforeLimits }, base);
     save(state, base);
@@ -359,7 +363,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     metric.finishedAt = new Date().toISOString();
     metric.durationMs = performance.now() - started;
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
-    metric.afterLimits = await limits(state, value);
+    metric.afterLimits = (await limits(state, value)).limits;
     if (state.status === 'limited') state.rateLimits = metric.afterLimits ?? beforeLimits;
     metric.status = state.status;
     metric.error = ['failed', 'limited'].includes(state.status) ? state.error : null;

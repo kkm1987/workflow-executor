@@ -158,7 +158,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   await run(state, runner, base, undefined, current => preflight(current, async (command, args, cwd) => {
     if (command === 'git') return execFileSync(command, args, { cwd, encoding: 'utf8' });
     return '';
-  }, () => 'codex'), async () => null);
+  }, () => 'codex'), async () => ({ limits: null, failure: null }));
   assert.equal(state.status, 'completed', state.error);
   assert.deepEqual(stages, ['prereview', 'execute', 'review', 'acceptance']);
   assert.deepEqual(state.evidence[0].changedFiles, []);

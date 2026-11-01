@@ -21,7 +21,7 @@ function fixture(t) {
   state.tasks = [{ title: '第一の対象', acceptance: '条件', status: 'pending' }, { title: '第二の対象', acceptance: '条件', status: 'pending' }];
   return { dir, target, base, state };
 }
-const checked = (state, runner, base) => step(state, runner, base, async () => ({ ok: true }), async () => null);
+const checked = (state, runner, base) => step(state, runner, base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
 
 test('実ログ由来Codex fixture: UTF-8の各バイト分割・未知イベント・未完末尾を許容する', () => {
   const entries = [];

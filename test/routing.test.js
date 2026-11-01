@@ -13,7 +13,7 @@ import { usage, performanceReport } from '../src/metrics.js';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
-const noLimits = async () => null;
+const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, approvals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
@@ -333,7 +333,7 @@ test('利用枠を解析し、不明値を未取得とし、足りない窓だ�
 test('利用枠不足はモデル0回でlimitedになり、modelまたはretryで新規再開できる', async t => {
   const { target, base } = fixture(t);
   const state = create(target, '試験', base);
-  await step(state, () => assert.fail('呼び出さない'), base, passed, async () => ({ primary: { usedPercent: 99, resetsAt: 123 } }));
+  await step(state, () => assert.fail('呼び出さない'), base, passed, async () => ({ limits: { primary: { usedPercent: 99, resetsAt: 123 } }, failure: null }));
   assert.equal(state.status, 'limited');
   assert.equal(state.attempts, 0);
   assert.match(summary(state).nextAction, /別モデル/);
@@ -352,7 +352,7 @@ test('CodexとClaudeのusage・割り当て・セッション・前後利用枠�
   const { target, base } = fixture(t);
   const state = create(target, '試験', base);
   let count = 0;
-  const limits = async () => ({ primary: { usedPercent: count++ }, secondary: null });
+  const limits = async () => ({ limits: { primary: { usedPercent: count++ }, secondary: null }, failure: null });
   await step(state, async (current, dir) => {
     writeFileSync(join(dir, 'codex.jsonl'), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 20, cached_input_tokens: 10, output_tokens: 5 } }));
     writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: 'codex-1' }));

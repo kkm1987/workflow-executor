@@ -13,8 +13,8 @@ import { taskGate, archive } from '../src/changes.js';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
-const checkedStep = (state, runner, base, check) => nativeStep(state, runner, base, check, async () => null);
-const checkedRun = (state, runner, base, progress, check) => nativeRun(state, runner, base, progress, check, async () => null);
+const checkedStep = (state, runner, base, check) => nativeStep(state, runner, base, check, async () => ({ limits: null, failure: null }));
+const checkedRun = (state, runner, base, progress, check) => nativeRun(state, runner, base, progress, check, async () => ({ limits: null, failure: null }));
 const preflight = (state, check) => nativePreflight(state, check, () => 'codex');
 const step = (state, runner, base) => checkedStep(state, runner, base, passed);
 const run = (state, runner, base) => checkedRun(state, runner, base, undefined, passed);
@@ -203,7 +203,7 @@ for (const stage of ['execute', 'prereview']) {
       assert.deepEqual(claude.slice(claude.indexOf('--allowedTools') + 1), ['Read', 'Glob', 'Grep']);
       assert.ok(!claude.includes('--add-dir'));
     }
-    await nativeStep(state, async () => ({ outcome: 'ok', summary: '説明' }), base, passed, async () => null,
+    await nativeStep(state, async () => ({ outcome: 'ok', summary: '説明' }), base, passed, async () => ({ limits: null, failure: null }),
       async () => assert.fail('確認の質問では検証しない'));
     assert.equal(state.status, 'waiting');
     assert.equal(state.stage, stage);

@@ -47,7 +47,7 @@ try {
           report: { scope: '試験', decisions: [], verification: '合図確認', remaining: 'なし' },
           tasks: [{ title: '試験', acceptance: '合図' }],
           decisions: { requirements: '試験', granularity: '試験', architecture: '試験' } };
-      }, base, () => {}, async () => ({ ok: true }), async () => null);
+      }, base, () => {}, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
     }
   }
 } catch (error) { process.send({ type: 'error', message: error.message }); }
