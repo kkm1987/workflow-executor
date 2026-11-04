@@ -580,6 +580,27 @@ test('実行前確認は対象・Git・CLI・認証・両プロファイルを�
   });
 });
 
+test('registered Core失敗はモデル0回で固定原因だけを状態とpreflightへ保存する', async t => {
+  const { state, base } = fixture(t);
+  await checkedStep(state, () => assert.fail('モデルを呼ばない'), base, value => preflight(value, async (_, args) => {
+    if (args[0] === 'sandbox') return checkCommand(process.execPath,
+      ['-e', 'console.error("registered Core launch requires an installed app secret-value"); process.exit(1)'], state.target);
+    return '';
+  }));
+  assert.equal(state.status, 'failed');
+  assert.equal(state.attempts, 0);
+  const persisted = load(state.id, base);
+  assert.match(persisted.error, /registered Core起動に失敗/);
+  assert.match(persisted.error, /終了コード 1/);
+  const dir = join(base, state.id);
+  const record = readFileSync(join(dir, readdirSync(dir).find(name => name.startsWith('preflight-'))), 'utf8');
+  assert.match(record, /registered Core起動に失敗/);
+  for (const text of [JSON.stringify(persisted), record]) {
+    assert.ok(!text.includes('secret-value'));
+    assert.ok(!text.includes('requires an installed app'));
+  }
+});
+
 test('検査失敗・タイムアウトはモデル0回で停止し、再開時に再検査する', async t => {
   const { state, base } = fixture(t);
   let calls = 0;

@@ -70,7 +70,8 @@ export function checkCommand(command, args, cwd, timeout = 15_000) {
       if (timedOut) reject(new Error(`タイムアウト (${timeout}ms)`));
       else if (code !== 0) {
         // 生の診断は保存せず、既知の原因だけを固定文へ分類する。
-        const cause = diagnostic.includes('orchestrator_helper_exit_nonzero') ? 'Windowsサンドボックスのセットアップ補助プロセスが失敗' :
+        const cause = diagnostic.includes('registered Core') ? 'Codexアプリ専用のregistered Core起動に失敗（端末の初期セットアップでは解決しない可能性）' :
+          diagnostic.includes('orchestrator_helper_exit_nonzero') ? 'Windowsサンドボックスのセットアップ補助プロセスが失敗' :
           diagnostic.includes('default_permissions requires') ? '権限プロファイルの設定が不整合' :
           /not logged in/i.test(diagnostic) ? 'Codexが未認証' :
           /アクセスが拒否|access is denied/i.test(diagnostic) ? 'アクセス拒否' : 'コマンドが失敗';

@@ -2,6 +2,14 @@ import { execFile, spawn } from 'node:child_process';
 import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join, delimiter, resolve } from 'node:path';
 
+export function clearCodexLaunchEnvironment(env, platform) {
+  if (platform !== 'win32') return;
+  delete env.CODEX_WINDOWS_REGISTERED_CORE;
+  delete env.CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY;
+}
+
+clearCodexLaunchEnvironment(process.env, process.platform);
+
 export function resolveCodex({ localAppData = process.env.LOCALAPPDATA, path = process.env.PATH ?? '', platform = process.platform } = {}) {
   if (platform === 'win32' && localAppData) {
     const bin = join(localAppData, 'OpenAI', 'Codex', 'bin');
