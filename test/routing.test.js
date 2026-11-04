@@ -43,7 +43,7 @@ test('Windowsの全起動経路はelevatedを要求し、他の環境には設�
           const args = codexArgs(state, base);
           verify(args);
           assert.equal(Boolean(codexThread(state).threadId), resumed);
-          assert.ok(args.includes('approval_policy="never"'));
+          assert.ok(args.includes(`approval_policy="${stage === 'execute' ? 'on-request' : 'never'}"`));
           assert.equal(args.includes('sandbox_workspace_write.network_access=true'), ['execute', 'prereview'].includes(stage));
           assert.equal(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base])}`), ['execute', 'prereview'].includes(stage));
           assert.equal(codexThread(state).sandbox, ['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only');

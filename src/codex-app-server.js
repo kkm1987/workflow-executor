@@ -18,7 +18,36 @@ export function execItem(item) {
   }
 }
 
-export function codexSession(child, { thread, turn, emit, raw, output, complete, fail }) {
+export const normalizeCommand = command => command.trim().replace(/\s+/g, ' ');
+
+export function escalationDecision(state, method, params) {
+  if (method === 'mcpServer/elicitation/request') return { decision: 'cancel', basis: '対話入力は取り消し', result: { action: 'cancel' } };
+  if (method === 'item/tool/requestUserInput') return { decision: 'cancel', basis: '対話入力は取り消し', result: { answers: {} } };
+  if (method === 'item/permissions/requestApproval') return { decision: 'decline', basis: '追加権限は既存のgrantで管理', result: { permissions: {}, scope: 'turn' } };
+  if (!['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)) return null;
+  let basis = 'execute以外の工程では拒否';
+  let decision = 'decline';
+  if (state.stage === 'execute' && !state.answers?.at(-1)?.inquiry && method === 'item/commandExecution/requestApproval') {
+    if (params.networkApprovalContext != null) {
+      decision = state.grants?.network ? 'accept' : 'decline';
+      basis = state.grants?.network ? 'grants.network' : 'ネットワークの許可なし';
+    } else {
+      const actions = params.commandActions;
+      const command = actions?.length === 1 ? actions[0]?.command : null;
+      // shortcut: 引用符内の区切りも拒否する。必要になった場合だけシェル解析を検討する。
+      if (typeof command !== 'string' || !command.trim()) basis = '単一のコマンドを取得できない';
+      else if (/;|&&|[\r\n]/.test(command)) basis = '連結・改行を含むコマンドは拒否';
+      else {
+        const matched = (state.grants?.commands ?? []).find(grant => normalizeCommand(grant) === normalizeCommand(command));
+        decision = matched ? 'accept' : 'decline';
+        basis = matched ? `grants.commands: ${matched}` : '完全一致する許可なし';
+      }
+    }
+  } else if (method === 'item/fileChange/requestApproval') basis = 'ファイル変更は既存の書き込みパスで管理';
+  return { decision, basis, result: { decision } };
+}
+
+export function codexSession(child, { thread, turn, emit, raw, output, complete, fail, approval = () => null }) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
   let threadId;
@@ -48,7 +77,9 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
       if (!message || typeof message !== 'object' || finished) continue;
       const { id, method, params = {} } = message;
       if (id !== undefined && method) {
-        if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)) send({ id, result: { decision: 'decline' } });
+        const result = approval(method, params);
+        if (result) send({ id, result });
+        else if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)) send({ id, result: { decision: 'decline' } });
         else send({ id, error: { code: -32601, message: 'Unsupported server request' } });
       } else if (id !== undefined) {
         if (message.error) { fail(new Error(JSON.stringify(message.error))); return; }

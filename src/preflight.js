@@ -1,9 +1,29 @@
 import { spawn } from 'node:child_process';
-import { statSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { statSync, readdirSync, readFileSync } from 'node:fs';
+import { resolve, join } from 'node:path';
+import { homedir } from 'node:os';
 import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
 import { resolveCodex, resolveExecutable, spawnCommand } from './commands.js';
 import { assignment, attemptAssignment, stagesFor } from './config.js';
+
+export function execpolicyRules(target, codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')) {
+  const records = [];
+  for (const dir of new Set([join(codexHome, 'rules'), join(target, '.codex', 'rules')])) {
+    let names;
+    try { names = readdirSync(dir); } catch (error) {
+      if (error.code !== 'ENOENT') records.push({ path: dir, error: error.code ?? error.message });
+      continue;
+    }
+    for (const name of names.filter(name => name.endsWith('.rules')).sort()) {
+      const path = join(dir, name);
+      try {
+        const count = readFileSync(path, 'utf8').split(/\r?\n/).filter(line => !line.trimStart().startsWith('#') && /\bdecision\s*=\s*["']allow["']/.test(line)).length;
+        if (count) records.push({ path, count });
+      } catch (error) { records.push({ path, error: error.code ?? error.message }); }
+    }
+  }
+  return records;
+}
 
 export async function checkGrantAccess(state, paths, check = checkCommand) {
   if (!paths.length) return;
@@ -62,7 +82,7 @@ export function checkCommand(command, args, cwd, timeout = 15_000) {
 }
 
 export async function preflight(state, check = checkCommand, locate = resolveCodex, locateClaude = () => resolveExecutable('claude'), spec = runOpenSpec) {
-  const report = { startedAt: new Date().toISOString(), target: state.target, checks: [], ok: false,
+  const report = { startedAt: new Date().toISOString(), target: state.target, checks: [], ok: false, execpolicyRules: execpolicyRules(state.target),
     ...(process.platform === 'win32' ? { requestedWindowsSandbox: 'elevated' } : {}) };
   let name = '開発対象';
   try {

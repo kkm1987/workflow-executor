@@ -20,7 +20,7 @@ const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   run <ID>                      回答待ち・失敗・完了まで工程を進める
   answer <ID> <回答ファイル> [--inquiry]  回答を保存（--inquiryは確認の質問）
   approve <ID> [条件ファイル]    承認計画を承認し、条件を保存
-  grant <ID> [--network] [--path <ディレクトリ>]...  権限要求を許可して再開
+  grant <ID> [--network] [--path <ディレクトリ>]... [--command <コマンド>]...  権限要求を許可して再開
   retry <ID>                 失敗・中断後、変更確認を経て再開可能にする
   evidence <ID> <JSONファイル>  停止中の案件へ外部証拠を登録
   status [ID | --all]            状態を確認（一覧は終了を除外、--allで全件）
@@ -78,7 +78,10 @@ try {
         const paths = [current.target, ...(current.grants?.paths ?? [])];
         if (current.kind === 'change') paths.push(current.openspec?.root ?? current.target);
         if (command === 'grant') for (let i = 1; i < args.length; i++) {
-          if (args[i] === '--path' && args[i + 1]) paths.push(args[++i]);
+          if (['--path', '--command'].includes(args[i]) && args[i + 1] !== undefined) {
+            const option = args[i++];
+            if (option === '--path') paths.push(args[i]);
+          }
         }
         return { id: current.id, paths };
       });
@@ -91,10 +94,11 @@ try {
       else if (command === 'approve') approve(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'close') close(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'grant') {
-        const options = { network: false, paths: [] };
+        const options = { network: false, paths: [], commands: [] };
         for (let i = 1; i < args.length; i++) {
           if (args[i] === '--network') options.network = true;
           else if (args[i] === '--path' && args[i + 1]) options.paths.push(args[++i]);
+          else if (args[i] === '--command' && args[i + 1] !== undefined) options.commands.push(args[++i]);
           else throw new Error(help);
         }
         await grant(state, options);

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync } from 'node:fs';
+import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { root, dataRoot, directory, save, saveActivity, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
@@ -12,7 +12,7 @@ import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, t
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
-import { codexSession } from './codex-app-server.js';
+import { codexSession, escalationDecision } from './codex-app-server.js';
 
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
 
@@ -44,7 +44,7 @@ export function codexSandbox(state) {
 export function codexThread(state) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
-  return { cwd: state.target, sandbox: codexSandbox(state), approvalPolicy: 'never', approvalsReviewer: 'user',
+  return { cwd: state.target, sandbox: codexSandbox(state), approvalPolicy: state.stage === 'execute' && !state.answers.at(-1)?.inquiry ? 'on-request' : 'never', approvalsReviewer: 'user',
     ...(value.model ? { model: value.model } : {}), ...(session ? { threadId: session.sessionId } : {}) };
 }
 
@@ -58,7 +58,7 @@ export function codexArgs(state) {
     ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
-    '-c', `sandbox_mode="${mode}"`, '-c', 'approval_policy="never"', '-c', 'approvals_reviewer="user"'];
+    '-c', `sandbox_mode="${mode}"`, '-c', `approval_policy="${codexThread(state).approvalPolicy}"`, '-c', 'approvals_reviewer="user"'];
 }
 
 export function claudeArgs(state, sessionId) {
@@ -101,6 +101,10 @@ async function invokeAgent(state, dir, command, prefix = []) {
   let finalOutput;
   const tools = new Map();
   const metadata = { ...value, sessionId, resumed: Boolean(resumeSession(state)), work: state.work ?? null };
+  const escalations = [];
+  const recordEscalation = (type, detail) => {
+    appendFileSync(join(dir, '..', 'events.jsonl'), JSON.stringify({ time: new Date().toISOString(), type, detail }) + '\n');
+  };
   const receive = eventStream(entry => {
     const latest = activity(entry, value.cli, new Date().toISOString(), tools);
     if (latest) state.activity = latest;
@@ -142,6 +146,21 @@ async function invokeAgent(state, dir, command, prefix = []) {
       const fail = error => { failure ??= error; kill(); };
       if (value.cli === 'codex') session = codexSession(child, {
         thread: codexThread(state),
+        approval: (method, params) => {
+          const choice = escalationDecision(state, method, params);
+          if (!choice) return null;
+          const entry = { time: new Date().toISOString(), attempt: state.attempts, ...attemptScope(state), kind: method,
+            command: params.command ?? null, commandActions: params.commandActions ?? [], reason: params.reason ?? null, cwd: params.cwd ?? null };
+          recordEscalation('escalation_requested', entry);
+          Object.assign(entry, { decidedAt: new Date().toISOString(), decision: choice.decision, basis: choice.basis });
+          escalations.push(entry);
+          state.evidence ??= [];
+          let evidence = state.evidence.findLast(item => item.attempt === state.attempts);
+          if (!evidence) { evidence = { attempt: state.attempts }; state.evidence.push(evidence); }
+          evidence.escalations = escalations;
+          recordEscalation('escalation_decided', entry);
+          return choice.result;
+        },
         turn: { input: [{ type: 'text', text: input }], outputSchema: JSON.parse(readFileSync(schemaPath(state), 'utf8')),
           ...(value.effort ? { effort: value.effort } : {}) },
         emit: entry => { const line = Buffer.from(JSON.stringify(entry) + '\n'); writeAll(stdout, line); receive(line); },
@@ -197,7 +216,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
       result = JSON.parse(readFileSync(join(dir, 'response.json'), 'utf8'));
     }
   } catch (error) { failure ??= error; }
-  writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...metadata, activity: state.activity ?? null }, null, 2));
+  writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...metadata, activity: state.activity ?? null, escalations }, null, 2));
   if (failure) {
     const logs = [...(value.cli === 'claude' ? ['claude.jsonl'] : ['codex.jsonl', 'codex-rpc.jsonl']), 'stderr.log'].map(file => {
       try { return readFileSync(join(dir, file), 'utf8'); } catch { return ''; }
@@ -247,6 +266,7 @@ export const runCodex = runAgent;
 
 async function prepare(state, base, check) {
   const report = await check(state);
+  if (report.execpolicyRules) state.execpolicyRules = report.execpolicyRules;
   if (report.executables) state.executables = { ...state.executables, ...report.executables };
   const dir = directory(state.id, base);
   const path = join(dir, `preflight-${Date.now()}-${process.hrtime.bigint()}.json`);

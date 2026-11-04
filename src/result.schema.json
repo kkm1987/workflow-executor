@@ -7,8 +7,8 @@
     "question": { "type": "string" },
     "permission": {
       "type": "object",
-      "properties": { "network": { "type": "boolean" }, "paths": { "type": "array", "items": { "type": "string" } } },
-      "required": ["network", "paths"],
+      "properties": { "network": { "type": "boolean" }, "paths": { "type": "array", "items": { "type": "string" } }, "commands": { "type": "array", "items": { "type": "string", "minLength": 1 } } },
+      "required": ["network", "paths", "commands"],
       "additionalProperties": false
     },
     "decisions": {

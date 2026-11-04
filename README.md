@@ -4,7 +4,7 @@
 
 ## 起動
 
-Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。Codexの新規実行・セッション再開は`codex app-server`のstdio JSON-RPCを使い、承認方針は`never`、承認要求の送信先は`user`に固定する。届いた承認要求は拒否する。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
+Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。Codexの新規実行・セッション再開は`codex app-server`のstdio JSON-RPCを使い、承認方針はexecuteだけ`on-request`、他の工程と確認の質問は`never`、承認要求の送信先は`user`に固定する。利用者設定の自動レビューには委ねない。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
 
 ### クローン後のセットアップ
 
@@ -60,7 +60,15 @@ MXC利用時の停止中案件を移行する際は、実行器と子プロセ�
 
 `run/step`はモデル呼び出し前に、対象ディレクトリ、Git作業ツリー、CLI起動・認証、読み取り用・書き込み用サンドボックスの起動を確認する。各コマンドの制限時間は15秒。対象コードは実行・変更せず、認証コマンドの出力も保存しない。同じ`run`内では1回、別の再開操作では再確認する。結果は`data/<ID>/preflight-*.json`に残り、失敗時はモデルを呼ばず`failed`になる。Windowsでチャットの制限内から別のサンドボックスを起動できない場合は、開発主体が実行環境を確認する。実行器は自動昇格しない。
 
+実行前確認の`execpolicyRules`は、`$CODEX_HOME/rules`（未指定なら`~/.codex/rules`）と対象の`.codex/rules`にある`decision="allow"`の行を`path`・`count`で記録する。読み取り失敗は`error`に残し、規則の存在・読み取り失敗だけでは実行を止めない。最新の記録は`status <ID> --detail`でも確認できる。規則は変更しない。規則による承認省略の有無を保証する記録ではなく、承認要求なしの実行に影響し得る設定を確認する手掛かりである。
+
 ## 状態と復旧
+
+executeでコマンドの昇格が拒否されると、エージェントは`outcome=permission`で必要なコマンドを`permission.commands`に返して停止する。所有者は理由・影響と全文を確認し、`node src/cli.js grant <ID> --command "Get-CimInstance Win32_Processor"`で要求されたコマンドだけを許可する（`--command`は複数指定可）。その後`run <ID>`で同じセッションを再開し、同じコマンドを再実行する。ネットワーク・書き込みパスは従来どおり`--network`・`--path`で管理する。
+
+許可は案件内の`grants.commands`へ保存され、executeの要求1回ごとに空白だけを正規化して全文比較する。接頭辞一致・セッション一括許可・恒久規則の追加は使わない。`;`・`&&`・改行は引用符内でも一律拒否し、パイプは全文一致の場合だけ許可する。ファイル変更と追加権限は昇格では許可せず、MCP・対話入力は取り消す。ネットワークの文脈がある要求は`grants.network`で判断する。旧状態に`grants.commands`がなければコマンド昇格の許可なしとして扱う。
+
+短い状態表示は回答待ちの要求コマンドを示す。`status <ID> --detail`は許可コマンドと全昇格履歴を返す。要求と判断は`events.jsonl`の`escalation_requested`・`escalation_decided`、試行の`invocation.json`と`state.evidence[].escalations`に残り、理由・作業ディレクトリ・判断時刻・一致した許可を追跡できる。
 
 `run`の終了を待ち、決まった間隔で状態を読まない。進捗を尋ねられたときだけ`status <ID>`を1回読む。回答待ちの確認質問には記録を調べて根拠ファイルを示し、回答は全項目がそろってから1回で保存する。記録にない実行エージェントの判断理由だけ`answer <ID> <ファイル> --inquiry`で転送して`run`する。実行後は`inquiry.reply`を提示して元の`question`への回答を待つ。確認の質問は読み取り専用で実行し、工程を進めず元の質問・権限要求を保つ。承認待ちでは利用できない。
 

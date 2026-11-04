@@ -228,7 +228,7 @@ test('選択CLIの権限確認と双方向の引数は承認・許可・工程�
       assert.match(inputFor(state), /条件を保持/);
       if (value.cli === 'codex') {
         assert.ok(args.includes(`sandbox_mode="${stage === 'review' ? 'read-only' : 'workspace-write'}"`));
-        assert.ok(args.includes('approval_policy="never"'));
+        assert.ok(args.includes(`approval_policy="${stage === 'execute' ? 'on-request' : 'never'}"`));
       } else {
         assert.ok(args.includes('dontAsk'));
         assert.equal(args.includes('Bash'), stage === 'execute');
