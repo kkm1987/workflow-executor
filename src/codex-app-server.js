@@ -67,6 +67,8 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
       try { message = JSON.parse(line); } catch { continue; }
       if (!message || typeof message !== 'object' || finished) continue;
       const { id, method, params = {} } = message;
+      // サブエージェントの通知も同じ接続に届くため、親turnの状態には使わない。
+      const subagent = params.threadId !== undefined && params.threadId !== threadId;
       if (id !== undefined && method) {
         const respond = result => {
           if (result) send({ id, result });
@@ -93,16 +95,18 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
           turnId = message.result.turn.id;
           if (interrupted) interrupt();
         }
+      } else if (method === 'item/started' || method === 'item/completed') {
+        const item = execItem(params.item);
+        if (item) emit({ type: method === 'item/started' ? 'item.started' : 'item.completed', item });
+        if (method === 'item/completed' && params.item.type === 'agentMessage' && !subagent) finalMessage = params.item.text;
+      } else if (subagent) {
+        continue;
       } else if (method === 'turn/started') {
         turnId = params.turn.id;
         emit({ type: 'turn.started' });
         if (interrupted) interrupt();
       } else if (method === 'thread/tokenUsage/updated') {
         tokenUsage = params.tokenUsage.total;
-      } else if (method === 'item/started' || method === 'item/completed') {
-        const item = execItem(params.item);
-        if (item) emit({ type: method === 'item/started' ? 'item.started' : 'item.completed', item });
-        if (method === 'item/completed' && params.item.type === 'agentMessage') finalMessage = params.item.text;
       } else if (method === 'error') {
         // 自動再試行される途中のエラーはexecでも最終失敗として扱わない。
         if (!params.willRetry) emit({ type: 'error', ...params });

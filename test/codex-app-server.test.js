@@ -81,6 +81,34 @@ test('最終agentMessageなしの正常終了は構造化出力の欠落で失�
   await assert.rejects(run(), /構造化出力がありません/);
 });
 
+for (const status of ['completed', 'failed']) test(`サブエージェントのturn ${status}では親turnを終了せず親の最終応答を返す`, async t => {
+  const { attempt, run } = fixture(t, `
+    notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } });
+    notify('item/completed', { threadId: 'child', item: { type: 'agentMessage', id: 'child-message', text: '子の報告' } });
+    notify('thread/tokenUsage/updated', { threadId: 'child', tokenUsage: { total: { inputTokens: 99, cachedInputTokens: 99, outputTokens: 99 } } });
+    notify('error', { threadId: 'child', message: '子の失敗', willRetry: false });
+    notify('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: '${status}' } });
+    setTimeout(() => {
+      notify('thread/tokenUsage/updated', { threadId: 'fake', tokenUsage: { total: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 2 } } });
+      finish({ summary: '親' });
+    }, 50);`);
+  assert.deepEqual(await run(), { summary: '親' });
+  assert.deepEqual(usage(attempt), { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 });
+  assert.equal(lines(attempt, 'codex.jsonl').filter(entry => entry.type === 'turn.started').length, 1);
+});
+
+test('サブエージェントのturn開始後も中断先は親turnのままである', () => {
+  const sent = [];
+  const session = codexSession({ stdin: { write: line => sent.push(JSON.parse(line)) } }, { thread: {}, turn: {}, emit() {}, raw() {}, output() {}, complete() {}, fail: error => { throw error; } });
+  session.receive(Buffer.from([
+    { id: 2, result: { thread: { id: 'parent' } } },
+    { method: 'turn/started', params: { threadId: 'parent', turn: { id: 'parent-turn' } } },
+    { method: 'turn/started', params: { threadId: 'child', turn: { id: 'child-turn' } } },
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n'));
+  session.interrupt();
+  assert.deepEqual(sent.at(-1).params, { threadId: 'parent', turnId: 'parent-turn' });
+});
+
 test('生ログだけの利用枠エラーもlimitedになる', async t => {
   const { run } = fixture(t, `notify('unknown', { detail: 'usage_limit_reached' }); process.exit(8);`);
   await assert.rejects(run(), error => error.limited === true);
