@@ -9,12 +9,16 @@
           "tasks": { "type": "string" },
           "action": { "type": "string" },
           "limits": { "type": "string" },
-          "stopWhen": { "type": "string" }
+          "stopWhen": { "type": "string" },
+          "gate": { "type": "string", "enum": ["plan", "each"] },
+          "replaces": { "type": "string" },
+          "basisAnswer": { "type": "integer", "minimum": 0 }
         },
-        "required": ["tasks", "action", "limits", "stopWhen"],
+        "required": ["tasks", "action", "limits", "stopWhen", "gate", "replaces", "basisAnswer"],
         "additionalProperties": false
       }
     },
+    "retainedApprovals": { "type": "array", "items": { "type": "string" } },
     "returnTo": { "type": "string", "enum": ["execute", "prereview", "none"] },
     "outcome": { "type": "string", "enum": ["ok", "question", "error"] },
     "summary": { "type": "string" },
@@ -51,6 +55,6 @@
       }
     }
   },
-  "required": ["returnTo", "outcome", "summary", "question", "change", "decisions", "tasks", "report", "approvals"],
+  "required": ["returnTo", "outcome", "summary", "question", "change", "decisions", "tasks", "report", "approvals", "retainedApprovals"],
   "additionalProperties": false
 }

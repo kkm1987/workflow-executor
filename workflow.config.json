@@ -27,6 +27,7 @@
       "acceptance": { "model": "claude-sonnet-5-5", "effort": "medium" }
     }
   },
+  "escalationReview": { "model": "gpt-6-luna", "effort": "medium" },
   "limits": {
     "plan": { "primary": 20, "secondary": 10 },
     "prereview": { "primary": 20, "secondary": 10 },

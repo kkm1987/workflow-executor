@@ -24,6 +24,16 @@ export function resolveCodex({ localAppData = process.env.LOCALAPPDATA, path = p
   throw new Error('Codex実行ファイルがありません。Codexを導入してください');
 }
 
+// PATHの先頭がWSLのbash.exeの場合があるため、System32とWindowsAppsを除く（sandbox内でE_ACCESSDENIEDになる）。
+export function resolveGitBash(env = process.env, platform = process.platform) {
+  if (platform !== 'win32') return 'bash';
+  if (env.CLAUDE_CODE_GIT_BASH_PATH) return env.CLAUDE_CODE_GIT_BASH_PATH;
+  const dirs = (env.PATH ?? '').split(delimiter).filter(dir => dir && !/[\\/](?:System32|WindowsApps)[\\/]?$/i.test(dir));
+  const found = resolveExecutable('bash', dirs.join(delimiter), platform);
+  if (!found) throw new Error('Git Bashが見つかりません');
+  return found;
+}
+
 export function resolveExecutable(command, path = process.env.PATH ?? '', platform = process.platform) {
   for (const dir of path.split(delimiter).filter(Boolean)) {
     for (const name of platform === 'win32' ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`] : [command]) {
@@ -32,6 +42,19 @@ export function resolveExecutable(command, path = process.env.PATH ?? '', platfo
     }
   }
   return null;
+}
+
+export const windowsSandboxArgs = (platform = process.platform) => platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : [];
+
+// Windowsの`codex sandbox`は`-P`使用時に`sandbox_workspace_write.*`を無視するため、呼び出し単位のプロファイルで渡す（2026-11-05実測）。
+export function sandboxProfileArgs(target, roots, network = false, platform = process.platform) {
+  if (platform !== 'win32') return ['-P', ':workspace', '-C', target, '--include-managed-config',
+    ...(network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+    ...(roots.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`] : [])];
+  return ['-P', 'workflow-grant', '-C', target, '--include-managed-config', ...windowsSandboxArgs(platform),
+    '-c', 'permissions.workflow-grant.extends=":workspace"',
+    '-c', `permissions.workflow-grant.workspace_roots={${[...new Set([target, ...roots])].map(root => `${JSON.stringify(root)}=true`).join(',')}}`,
+    ...(network ? ['-c', 'permissions.workflow-grant.network.enabled=true'] : [])];
 }
 
 // Windowsのnpm shimはシェルへ渡さず、同梱されたJSをNodeで直接起動する。

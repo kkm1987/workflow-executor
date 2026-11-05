@@ -16,7 +16,7 @@ const passed = async () => ({ ok: true });
 const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
-const prereview = { ...ok, approvals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
+const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
 
 test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
   const { target, base } = fixture(t);
@@ -270,13 +270,13 @@ test('承認計画への回答は同じ担当のセッションへ説明と回�
       models: { prereview: { model, effort: 'medium' } } });
     await step(state, async (current, dir) => {
       writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: '計画セッション' }));
-      return { ...prereview, approvals: [{ tasks: '入力検証', action: 'VMで検証', limits: '20ユーロ', stopWhen: '上限到達' }] };
+      return { ...prereview, approvals: [{ tasks: '入力検証', action: 'VMで検証', limits: '20ユーロ', stopWhen: '上限到達', gate: 'plan' }] };
     }, base, passed, noLimits, async () => {});
     assert.equal(state.status, 'waiting');
     assert.equal(state.session.stage, 'prereview');
     answer(state, 'VMは使用しない', base);
     const saved = structuredClone(state.session);
-    const expected = '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\nVMは使用しない';
+    const expected = '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\nVMは使用しない';
     assert.equal(inputFor(state), expected);
     const args = () => assignment(state).cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, '新規');
     const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';

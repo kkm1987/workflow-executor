@@ -242,7 +242,7 @@ test('選択CLIの権限確認と双方向の引数は承認・許可・工程�
         let accessChecks = 0;
         const report = await preflight(state, async (_, args) => {
           if (args[0] === 'sandbox' && args.includes('workflow-grant')) accessChecks++;
-          return '{"loggedIn":true}';
+          return args.includes('--settings') ? 'workflow-gate-probe' : '{"loggedIn":true}';
         }, () => 'codex', () => 'claude', async () => JSON.stringify({ root: { path: target } }));
         assert.equal(report.ok, true);
         if (process.platform === 'win32') assert.equal(accessChecks, value.cli === 'codex' ? 1 : 0);

@@ -234,7 +234,7 @@ test('独立案件の予約中もCLI更新でき、answer・modelの保存を後
   assert.equal((await cli('model', state.id, 'plan', 'gpt-6-luna')).code, 0);
   const current = load(state.id, base);
   assert.equal(current.answers.at(-1).answer, '先行回答'); assert.equal(current.models.plan.model, 'gpt-6-luna');
-  assert.equal(current.attempts, 3); assert.equal(current.revisions, 2); assert.deepEqual(current.approval, state.approval);
+  assert.equal(current.attempts, 3); assert.equal(current.revisions, 2); assert.deepEqual(current.approval, { ...state.approval, pending: [], nextId: 1 });
   assert.deepEqual(current.externalEvidence, state.externalEvidence); assert.deepEqual(current.evidence, state.evidence);
   assert.equal(current.session, undefined);
   const operation = reserve(base, () => {

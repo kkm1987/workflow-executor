@@ -47,6 +47,12 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
       if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error('利用枠の固定値が不正です');
     }
   }
+  if (config.escalationReview === undefined) config.escalationReview = { model: 'gpt-6-luna', effort: 'medium' };
+  if (config.escalationReview !== null) {
+    const review = validateModel(config.escalationReview);
+    if (review.cli !== 'codex' || !review.model) throw new Error('escalationReviewにはCodexモデルが必要です');
+    config.escalationReview = review;
+  }
   if (config.dashboardArtifact !== undefined) {
     const value = config.dashboardArtifact;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('dashboardArtifactの指定が不正です');

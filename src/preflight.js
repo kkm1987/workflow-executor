@@ -3,8 +3,9 @@ import { statSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
-import { resolveCodex, resolveExecutable, spawnCommand } from './commands.js';
+import { resolveCodex, resolveExecutable, spawnCommand, windowsSandboxArgs, sandboxProfileArgs } from './commands.js';
 import { assignment, attemptAssignment, stagesFor } from './config.js';
+import { probeSettings, gateRequired, PROBE_MARKER } from './claude-gate.js';
 
 export function execpolicyRules(target, codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')) {
   const records = [];
@@ -32,11 +33,7 @@ export async function checkGrantAccess(state, paths, check = checkCommand) {
   for (const path of paths) {
     try {
       if (codex) {
-        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', '-P', process.platform === 'win32' ? 'workflow-grant' : ':workspace', '-C', state.target,
-          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
-          ...(process.platform === 'win32' ? ['-c', 'permissions.workflow-grant.extends=":workspace"',
-            '-c', `permissions.workflow-grant.workspace_roots={${[...new Set(roots)].map(root => `${JSON.stringify(root)}=true`).join(',')}}`] :
-            ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`]),
+        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, roots),
           '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target);
       } else readdirSync(path);
     } catch {
@@ -108,7 +105,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       ['Codex認証', codex, ['login', 'status']],
       ...[':read-only', ':workspace'].map(profile => [
         `サンドボックス ${profile}`, codex, ['sandbox', '-P', profile, '-C', state.target,
-          '--include-managed-config', ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
+          '--include-managed-config', ...windowsSandboxArgs(),
           '--', process.execPath, '-e', 'process.exit(0)'],
       ]),
     ];
@@ -128,6 +125,14 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
     if (state.attemptAssignment && state.stage === 'execute') {
       name = `${attemptAssignment(state).cli}の追加パスアクセス`;
       await checkGrantAccess({ ...state, executables: { ...state.executables, ...report.executables } }, state.grants?.paths ?? [], check);
+      report.checks.push({ name, ok: true });
+    }
+    if (state.attemptAssignment && gateRequired(state)) {
+      name = 'Claudeの判断フック';
+      // UserPromptSubmitのblockはモデルを呼ばずにフックの読み込みを確かめられる。
+      const output = await check(report.executables.claude, ['-p', 'probe', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+        '--settings', probeSettings(), '--output-format', 'json', '--tools', 'Read'], state.target, 30_000);
+      if (typeof output === 'string' && !output.includes(PROBE_MARKER)) throw new Error('フックが動作しません');
       report.checks.push({ name, ok: true });
     }
     report.ok = true;

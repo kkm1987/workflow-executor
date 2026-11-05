@@ -1,18 +1,20 @@
 import { spawn } from 'node:child_process';
-import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { root, dataRoot, directory, save, saveActivity, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { usage, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
-import { resolveCodex, spawnCommand } from './commands.js';
+import { resolveCodex, spawnCommand, commandSpec, windowsSandboxArgs, sandboxProfileArgs, resolveGitBash } from './commands.js';
 import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, taskGate } from './changes.js';
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
 import { codexSession, escalationDecision } from './codex-app-server.js';
+import { reviewCommand, codexReview, answerReviewPrompt, planItems } from './escalation.js';
+import { gateSettings, gateRequired } from './claude-gate.js';
 
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
 
@@ -34,7 +36,7 @@ export function inputFor(state) {
   if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
   const last = state.answers.at(-1);
   if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' + last.answer;
-  return (last.approval ? '承認計画への所有者の回答です。反映して残り全体の計画を出し直してください。\n' : '') + last.answer;
+  return (last.approval ? '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\n' : '') + last.answer;
 }
 
 export function codexSandbox(state) {
@@ -48,20 +50,22 @@ export function codexThread(state) {
     ...(value.model ? { model: value.model } : {}), ...(session ? { threadId: session.sessionId } : {}) };
 }
 
+export const writablePaths = state => [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+
 export function codexArgs(state) {
   const value = attemptAssignment(state);
   const mode = codexSandbox(state);
-  const paths = [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+  const paths = writablePaths(state);
   return ['app-server',
     ...(value.model ? ['-c', `model=${JSON.stringify(value.model)}`] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
-    ...(process.platform === 'win32' ? ['-c', 'features.prefer_mxc=false', '-c', 'windows.sandbox=elevated'] : []),
+    ...windowsSandboxArgs(),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
     '-c', `sandbox_mode="${mode}"`, '-c', `approval_policy="${codexThread(state).approvalPolicy}"`, '-c', 'approvals_reviewer="user"'];
 }
 
-export function claudeArgs(state, sessionId) {
+export function claudeArgs(state, sessionId, dir = '') {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
   const tools = ['Read', 'Glob', 'Grep'];
@@ -85,7 +89,29 @@ export function claudeArgs(state, sessionId) {
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
     '--output-format', 'stream-json', '--verbose', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
     ...(session ? ['--resume', session.sessionId] : ['--session-id', sessionId]),
+    ...(gateRequired(state) ? ['--settings', gateSettings(join(dir, 'gate-context.json'))] : []),
     '--permission-mode', 'dontAsk', '--allowedTools', ...tools];
+}
+
+// 審査は工程の担当によらず常にCodexで行う。無効または起動できない場合はnullで所有者の判断へ戻す。
+function reviewer(state, dir, cli, command, prefix, signal) {
+  const setting = readConfig().escalationReview;
+  if (!setting) return null;
+  let count = 0;
+  const codex = cli === 'codex' ? { command, prefix } : { command: state.executables?.codex ?? resolveCodex(), prefix: [] };
+  return input => {
+    const path = join(dir, `review-${++count}.jsonl`);
+    return codexReview({ ...codex, cwd: state.target, setting, input, signal, log: line => appendFileSync(path, line) });
+  };
+}
+
+function gateContext(state, dir) {
+  const [file, argv] = commandSpec(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, writablePaths(state), Boolean(state.grants?.network))]);
+  const quote = value => `'${String(value).replaceAll('\\', '/').replaceAll("'", "'\\''")}'`;
+  return { state: { stage: state.stage, target: state.target, answers: state.answers.slice(-1), grants: state.grants ?? {}, approval: state.approval, tasks: state.tasks },
+    attempt: state.attempts, scope: attemptScope(state), writable: [state.target, ...writablePaths(state)], dir, review: readConfig().escalationReview,
+    codex: { command: state.executables?.codex ?? resolveCodex() },
+    sandbox: `${[file, ...argv].map(quote).join(' ')} -- ${quote(resolveGitBash())} -c` };
 }
 
 async function invokeAgent(state, dir, command, prefix = []) {
@@ -105,6 +131,13 @@ async function invokeAgent(state, dir, command, prefix = []) {
   const recordEscalation = (type, detail) => {
     appendFileSync(join(dir, '..', 'events.jsonl'), JSON.stringify({ time: new Date().toISOString(), type, detail }) + '\n');
   };
+  const addEscalation = entry => {
+    escalations.push(entry);
+    state.evidence ??= [];
+    let evidence = state.evidence.findLast(item => item.attempt === state.attempts);
+    if (!evidence) { evidence = { attempt: state.attempts }; state.evidence.push(evidence); }
+    evidence.escalations = escalations;
+  };
   const receive = eventStream(entry => {
     const latest = activity(entry, value.cli, new Date().toISOString(), tools);
     if (latest) state.activity = latest;
@@ -117,7 +150,8 @@ async function invokeAgent(state, dir, command, prefix = []) {
     stderr = openSync(join(dir, 'stderr.log'), 'w');
     if (value.cli === 'codex') rpc = openSync(join(dir, 'codex-rpc.jsonl'), 'w');
     await new Promise((resolve, reject) => {
-      const args = value.cli === 'codex' ? codexArgs(state, dir) : claudeArgs(state, sessionId);
+      if (gateRequired(state)) writeFileSync(join(dir, 'gate-context.json'), JSON.stringify(gateContext(state, dir)));
+      const args = value.cli === 'codex' ? codexArgs(state, dir) : claudeArgs(state, sessionId, dir);
       const child = spawnCommand(command, [...prefix, ...args], {
         cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true,
       });
@@ -125,6 +159,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
       let killed = false;
       let shutdownTimer;
       let session;
+      const reviews = new AbortController();
       const kill = () => {
         if (!child.pid) return;
         killed = true;
@@ -138,6 +173,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
       const stop = () => {
         interrupted = true;
         failure ??= new Error('実行が中断されました。対象の変更を確認してからretryしてください');
+        reviews.abort();
         if (session) {
           try { session.interrupt(); } catch (error) { failure ??= error; }
           shutdownTimer ??= setTimeout(kill, 1000);
@@ -149,17 +185,17 @@ async function invokeAgent(state, dir, command, prefix = []) {
         approval: (method, params) => {
           const choice = escalationDecision(state, method, params);
           if (!choice) return null;
-          const entry = { time: new Date().toISOString(), attempt: state.attempts, ...attemptScope(state), kind: method,
+          const entry = { time: new Date().toISOString(), attempt: state.attempts, ...attemptScope(state), cli: 'codex', kind: method,
             command: params.command ?? null, commandActions: params.commandActions ?? [], reason: params.reason ?? null, cwd: params.cwd ?? null };
           recordEscalation('escalation_requested', entry);
-          Object.assign(entry, { decidedAt: new Date().toISOString(), decision: choice.decision, basis: choice.basis });
-          escalations.push(entry);
-          state.evidence ??= [];
-          let evidence = state.evidence.findLast(item => item.attempt === state.attempts);
-          if (!evidence) { evidence = { attempt: state.attempts }; state.evidence.push(evidence); }
-          evidence.escalations = escalations;
-          recordEscalation('escalation_decided', entry);
-          return choice.result;
+          const decided = final => {
+            Object.assign(entry, { decidedAt: new Date().toISOString(), decision: final.decision, basis: final.basis, layer: final.layer, ...(final.review ? { review: final.review } : {}) });
+            addEscalation(entry);
+            recordEscalation('escalation_decided', entry);
+            return Object.hasOwn(choice.result, 'decision') ? { decision: final.decision } : choice.result;
+          };
+          if (!choice.reviewRequest) return decided(choice);
+          return reviewCommand(state, choice, reviewer(state, dir, value.cli, command, prefix, reviews.signal), params.reason).then(decided);
         },
         turn: { input: [{ type: 'text', text: input }], outputSchema: JSON.parse(readFileSync(schemaPath(state), 'utf8')),
           ...(value.effort ? { effort: value.effort } : {}) },
@@ -182,6 +218,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
       child.once('error', reject);
       child.stdin.on('error', error => { if (error.code !== 'EPIPE') fail(error); });
       child.once('close', code => {
+        reviews.abort();
         clearTimeout(shutdownTimer);
         process.removeListener('SIGINT', stop);
         process.removeListener('SIGTERM', stop);
@@ -198,6 +235,16 @@ async function invokeAgent(state, dir, command, prefix = []) {
   } finally {
     for (const handle of [stdout, stderr, rpc]) {
       if (handle !== undefined) { try { closeSync(handle); } catch (error) { failure ??= error; } }
+    }
+  }
+  // フックは別プロセスなので判断を試行のファイルへ書き、ここで証拠へ取り込む。
+  if (existsSync(join(dir, 'gate.jsonl'))) {
+    for (const line of readFileSync(join(dir, 'gate.jsonl'), 'utf8').split('\n').filter(Boolean)) {
+      const entry = JSON.parse(line);
+      const { decidedAt, decision, basis, layer, review, ...requested } = entry;
+      recordEscalation('escalation_requested', requested);
+      addEscalation(entry);
+      recordEscalation('escalation_decided', entry);
     }
   }
   let result;
@@ -282,14 +329,39 @@ async function prepare(state, base, check) {
   return report.ok;
 }
 
-export async function step(state, runner = runCodex, base = dataRoot, check = preflight, limits = rateLimits, validate = validatePrereview) {
+export async function step(state, runner = runCodex, base = dataRoot, check = preflight, limits = rateLimits, validate = validatePrereview, review) {
   if (state.status !== 'ready') throw new Error(`実行できない状態です: ${state.status}`);
   delete state.attemptAssignment;
   if (!await prepare(state, base, check)) return state;
-  return executeStep(state, runner, base, limits, validate, check, new Set());
+  return executeStep(state, runner, base, limits, validate, check, new Set(), review);
 }
 
-async function executeStep(state, runner, base, limits, validate, check, checked) {
+// 回答を根拠とする変更だけを審査する。それ以外と審査の不調は承認待ちになる。
+async function reviewAnswers(state, result, dir, review) {
+  if (state.stage !== 'prereview' || result?.outcome !== 'ok' || !Array.isArray(result.approvals)) return {};
+  const reviews = {};
+  for (const [index, item] of result.approvals.entries()) {
+    const before = planItems(state).find(entry => entry.id === item?.replaces);
+    const basis = state.answers[(item?.basisAnswer ?? 0) - 1];
+    if (!before || !basis || basis.inquiry || item.gate !== 'plan') continue;
+    try {
+      const output = await review(answerReviewPrompt(state, before, item, basis.answer), dir, reviews);
+      if (output?.decision === 'allow' && output.approvalId === before.id && ['low', 'medium', 'high'].includes(output.riskLevel)) reviews[index] = output;
+    } catch {}
+  }
+  return reviews;
+}
+
+function defaultReview(state) {
+  return (input, dir, reviews) => {
+    const setting = readConfig().escalationReview;
+    if (!setting) return null;
+    return codexReview({ command: state.executables?.codex ?? resolveCodex(), cwd: state.target, setting, input,
+      log: line => appendFileSync(join(dir, `review-${Object.keys(reviews).length + 1}.jsonl`), line) });
+  };
+}
+
+async function executeStep(state, runner, base, limits, validate, check, checked, review = defaultReview(state)) {
   const inquiry = Boolean(state.answers.at(-1)?.inquiry);
   if (['granularity', 'architecture'].includes(state.stage)) {
     event(state, 'stage_migrated', { from: state.stage, to: 'plan' }, base);
@@ -340,7 +412,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   }
   state.attemptAssignment = value;
   const checkKey = `${state.stage}:${value.cli}`;
-  if ((value === fallback || (state.stage === 'execute' && state.grants?.paths?.length)) && !checked.has(checkKey)) {
+  if ((value === fallback || (state.stage === 'execute' && (state.grants?.paths?.length || value.cli === 'claude'))) && !checked.has(checkKey)) {
     if (!await prepare(state, base, check)) { delete state.attemptAssignment; save(state, base); return state; }
     checked.add(checkKey);
   }
@@ -390,7 +462,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
       if (problems.length) result = { ...result, outcome: 'revise', summary: `tasks.mdの確認に失敗しました:\n${problems.join('\n')}` };
     }
     if (inquiry) resolveInquiry(state, result);
-    else advance(state, result);
+    else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base) });
     if (state.status !== 'waiting') delete state.session;
     if (state.status === 'waiting' && (inquiry || result.outcome !== 'partial') && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
@@ -440,7 +512,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     state.status = 'ready';
     delete state.error;
     save(state, base);
-    return executeStep(state, runner, base, limits, validate, check, checked);
+    return executeStep(state, runner, base, limits, validate, check, checked, review);
   }
   return state;
 }
