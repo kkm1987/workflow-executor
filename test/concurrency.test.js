@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, symlinkSync, cpSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { reserve, withSharedLock, canonicalDirectory, overlaps } from '../src/locking.js';
-import { root, create, load, save } from '../src/workflow.js';
+import { root, create, close, load, save, saveActivity } from '../src/workflow.js';
 import { runPublisher } from '../src/publish.js';
 
 function fixture(t) {
@@ -80,11 +80,15 @@ test('共有排他は例外後に解放し、残存・壊れた記録を5秒上�
   const w = await start(t, { mode: 'shared', base });
   assert.match((await w.next()).message, /共有内例外/); await finish(w);
   assert.doesNotThrow(() => withSharedLock(base, () => {}));
-  for (const text of [JSON.stringify({ pid: 2147483647, token: randomUUID(), startedAt: new Date(0).toISOString() }), '{']) {
-    const path = join(base, 'shared-update.lock');
+  const path = join(base, 'shared-update.lock');
+  const owner = JSON.stringify({ pid: 2147483647, token: randomUUID(), startedAt: new Date(0).toISOString() });
+  for (const [text, message] of [
+    [owner, `共有更新ロックを5秒以内に取得できませんでした: ${path}`],
+    ['{', `ロック記録が不正です。所有者・子プロセス・差分を確認してください: ${path}`],
+  ]) {
     writeFileSync(path, text);
     const at = performance.now();
-    assert.throws(() => withSharedLock(base, () => assert.fail()), /5秒|記録が不正/);
+    assert.throws(() => withSharedLock(base, () => assert.fail()), { message });
     assert.ok(performance.now() - at >= 4900);
     assert.ok(performance.now() - at < 6500);
     assert.equal(readFileSync(path, 'utf8'), text);
@@ -161,14 +165,14 @@ test('並行保存とstatus生成は履歴付き二案件の最新行とJSONを�
   assert.ok(!readdirSync(base).some(name => name.endsWith('.new')));
 });
 
-function isolatedCli(dir) {
+function isolatedCli(dir, nodeArgs = []) {
   cpSync(join(root, 'src'), join(dir, 'src'), { recursive: true });
   writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
   const config = JSON.parse(readFileSync(join(root, 'workflow.config.json'), 'utf8'));
   delete config.dashboardArtifact;
   writeFileSync(join(dir, 'workflow.config.json'), JSON.stringify(config));
   return async (...args) => {
-    const child = spawn(process.execPath, [join(dir, 'src/cli.js'), ...args], { cwd: dir, windowsHide: true });
+    const child = spawn(process.execPath, [...nodeArgs, join(dir, 'src/cli.js'), ...args], { cwd: dir, windowsHide: true });
     let out = '', err = '';
     child.stdout.on('data', x => { out += x; }); child.stderr.on('data', x => { err += x; });
     const [code] = await once(child, 'close');
@@ -200,6 +204,69 @@ test('共有ロックを取得できなくてもstatusは保存済みの状態�
     assert.equal(shown.status, state.status);
     assert.deepEqual(filesUnder(base), before);
   }
+});
+
+test('書き込み可能ならstatusは定期保存後の最新活動をダッシュボードに反映する', async t => {
+  const { dir, base, a } = fixture(t);
+  const cli = isolatedCli(dir);
+  const state = create(a, '実行中の案件', base);
+  state.status = 'running'; save(state, base);
+  state.activity = { kind: 'report', text: '保存済みの最新活動', at: new Date().toISOString() };
+  saveActivity(state, base);
+  const markdown = join(base, 'dashboard.md');
+  assert.ok(!readFileSync(markdown, 'utf8').includes(state.activity.text));
+
+  const result = await cli('status', state.id);
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.err, '');
+  assert.deepEqual(JSON.parse(result.out).activity, state.activity);
+  const refreshed = readFileSync(markdown, 'utf8');
+  assert.ok(refreshed.includes(state.activity.text));
+  assert.ok(refreshed.includes(state.activity.at));
+  assert.match(refreshed, /^更新: \S+/m);
+});
+
+test('書き込み拒否でもstatusの表示、一覧の絞り込み、案件ごとの終了コードを維持する', { skip: process.platform !== 'win32', timeout: 20000 }, async t => {
+  const { dir, base, a } = fixture(t);
+  const preload = new URL('./fixtures/deny-shared-lock.mjs', import.meta.url).href;
+  const cli = isolatedCli(dir, ['--import', preload]);
+  const active = create(a, '実行中の案件', base);
+  active.status = 'running'; save(active, base);
+  const stopped = ['failed', 'blocked', 'limited'].map(status => {
+    const state = create(a, status, base);
+    state.status = status; save(state, base);
+    return state;
+  });
+  const closed = create(a, '終了した案件', base);
+  close(closed, '終了理由', base);
+  active.activity = { kind: 'report', text: '保存済みの最新活動', at: new Date().toISOString() };
+  saveActivity(active, base);
+  reserve(base, () => ({ id: active.id, paths: [a] }));
+  const before = filesUnder(base);
+  const lock = join(base, 'shared-update.lock');
+  assert.equal(existsSync(lock), false);
+  const warning = `ダッシュボードを更新できませんでした: 共有更新ロックへの書き込みが拒否されました (open wx, EPERM): ${lock}`;
+
+  const cases = [
+    { args: [active.id, '--detail'], code: 0, state: active },
+    ...stopped.map(state => ({ args: [state.id], code: 1, state })),
+    { args: [], code: 0, states: [active, ...stopped] },
+    { args: ['--all'], code: 0, states: [active, ...stopped, closed] },
+  ];
+  const results = await Promise.all(cases.map(({ args }) => cli('status', ...args)));
+  const identities = items => items.map(({ id, status }) => `${id} ${status}`).sort();
+  for (const [index, { args, code, state, states }] of cases.entries()) {
+    const result = results[index];
+    assert.equal(result.code, code, args.join(' '));
+    assert.equal(result.err.trim(), warning);
+    const shown = JSON.parse(result.out);
+    assert.deepEqual(identities(state ? [shown] : shown), identities(state ? [state] : states));
+    if (state === active) {
+      assert.deepEqual(shown.activity, active.activity);
+      assert.deepEqual(shown.history, []);
+    }
+  }
+  assert.deepEqual(filesUnder(base), before);
 });
 
 test('全CLI更新は競合時にstate・events・attemptを変更せず、grant追加先と共有ストアも保護する', { timeout: 30000 }, async t => {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWrite, withSharedLock } from '../src/locking.js';
 
-test('Windowsの共有ロックは一時的な拒否を再試行し、書き込み拒否と競合を区別する', { skip: process.platform !== 'win32', timeout: 20000 }, t => {
+test('Windowsの共有ロックは一時的な拒否を再試行し、期限時の記録と最後のエラーで判定する', { skip: process.platform !== 'win32' }, t => {
   const parent = fileURLToPath(new URL('../agent-docs/', import.meta.url));
   fs.mkdirSync(parent, { recursive: true });
   const dir = fs.mkdtempSync(join(parent, 'shared-lock-'));
@@ -14,12 +14,21 @@ test('Windowsの共有ロックは一時的な拒否を再試行し、書き込�
   const open = fs.openSync;
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); fs.rmSync(dir, { recursive: true, force: true }); });
   const denied = Object.assign(new Error('書き込み拒否'), { code: 'EPERM', syscall: 'open' });
-  let denials = 3;
+  const exists = Object.assign(new Error('ファイルあり'), { code: 'EEXIST', syscall: 'open' });
+  let failure = () => attempts <= 3 ? denied : undefined;
+  let elapsed = 0;
   let attempts = 0;
+  t.mock.method(performance, 'now', () => elapsed);
+  t.mock.method(Atomics, 'wait', (_array, _index, _value, timeout) => {
+    elapsed += timeout;
+    assert.ok(elapsed <= 5010, 'ロックの再試行は5秒で打ち切る');
+    return 'timed-out';
+  });
   t.mock.method(fs, 'openSync', (file, flags, ...args) => {
     if (file === path && flags === 'wx') {
       attempts++;
-      if (attempts <= denials) throw denied;
+      const error = failure();
+      if (error) throw error;
     }
     return open(file, flags, ...args);
   });
@@ -29,26 +38,43 @@ test('Windowsの共有ロックは一時的な拒否を再試行し、書き込�
   assert.equal(attempts, 4);
   assert.equal(fs.existsSync(path), false);
 
-  denials = Infinity;
-  attempts = 0;
-  const started = performance.now();
-  assert.throws(() => withSharedLock(dir, () => assert.fail()), error => {
+  const writeDenial = error => {
     assert.match(error.message, /書き込みが拒否.*open wx.*EPERM/);
     assert.ok(error.message.includes(path));
     assert.doesNotMatch(error.message, /競合|5秒以内に取得できません/);
     assert.equal(error.cause, denied);
     return true;
-  });
-  assert.ok(attempts > 1);
-  assert.ok(performance.now() - started < 6500);
-  assert.equal(fs.existsSync(path), false);
-
+  };
+  const contention = { message: `共有更新ロックを5秒以内に取得できませんでした: ${path}` };
   const owner = JSON.stringify({ token: 'other', pid: 2147483647, startedAt: new Date(0).toISOString() });
-  fs.writeFileSync(path, owner);
-  assert.throws(() => withSharedLock(dir, () => assert.fail()), {
-    message: `共有更新ロックを5秒以内に取得できませんでした: ${path}`
-  });
-  assert.equal(fs.readFileSync(path, 'utf8'), owner);
+  for (const { record, initial, last, expected } of [
+    { initial: denied, last: denied, expected: writeDenial },
+    { initial: exists, last: denied, expected: writeDenial },
+    { initial: denied, last: exists, expected: contention },
+    { record: owner, initial: denied, last: denied, expected: contention },
+    { record: '{', initial: denied, last: denied, expected: /ロック記録が不正/ },
+  ]) {
+    if (record !== undefined) fs.writeFileSync(path, record);
+    failure = () => elapsed < 5000 ? initial : last;
+    elapsed = attempts = 0;
+    assert.throws(() => withSharedLock(dir, () => assert.fail('操作を実行してはいけない')), expected);
+    assert.equal(elapsed, 5000);
+    assert.ok(attempts > 1);
+    if (record === undefined) assert.equal(fs.existsSync(path), false);
+    else {
+      assert.equal(fs.readFileSync(path, 'utf8'), record);
+      fs.unlinkSync(path);
+    }
+  }
+
+  for (const [code, syscall] of [['EACCES', 'open'], ['EPERM', 'write']]) {
+    const error = Object.assign(new Error('入出力エラー'), { code, syscall });
+    failure = () => error;
+    elapsed = attempts = 0;
+    assert.throws(() => withSharedLock(dir, () => assert.fail('操作を実行してはいけない')), actual => actual === error);
+    assert.equal(attempts, 1);
+    assert.equal(elapsed, 0);
+  }
 });
 
 test('Windowsの原子的保存は一時的な置換拒否を再試行し、恒久エラーでは元ファイルを保持する', { skip: process.platform !== 'win32' }, t => {
