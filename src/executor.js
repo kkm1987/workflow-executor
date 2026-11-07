@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { root, dataRoot, directory, save, saveActivity, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
-import { usage, performanceReport } from './metrics.js';
+import { tokenMetrics, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
 import { resolveCodex, spawnCommand, commandSpec, windowsSandboxArgs, sandboxProfileArgs, resolveGitBash } from './commands.js';
 import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, taskGate } from './changes.js';
@@ -498,7 +498,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     if (state.status === 'limited') state.rateLimits = metric.afterLimits ?? beforeLimits;
     metric.status = state.status;
     metric.error = ['failed', 'limited'].includes(state.status) ? state.error : null;
-    metric.usage = usage(dir, value.cli);
+    Object.assign(metric, tokenMetrics(dir, value.cli));
     state.metrics ??= [];
     state.metrics.push(metric);
     writeFileSync(join(dir, 'metrics.json'), JSON.stringify(metric, null, 2));

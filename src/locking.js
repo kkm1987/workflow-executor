@@ -32,11 +32,12 @@ export function withSharedLock(base, action) {
     try { createOwner(path, value); break; }
     catch (error) {
       // Windowsでは削除処理中のファイルへの排他作成もEPERMになる。
-      const deleting = process.platform === 'win32' && error.code === 'EPERM' && error.syscall === 'open';
-      if (error.code !== 'EEXIST' && !deleting) throw error;
+      const openDenied = process.platform === 'win32' && error.code === 'EPERM' && error.syscall === 'open';
+      if (error.code !== 'EEXIST' && !openDenied) throw error;
       // 作成直後の所有者記録の書き込み中も、取得せず上限まで待つ。
       if (performance.now() >= deadline) {
         if (existsSync(path)) readOwner(path);
+        else if (openDenied) throw new Error(`共有更新ロックへの書き込みが拒否されました (open wx, ${error.code}): ${path}`, { cause: error });
         throw new Error(`共有更新ロックを5秒以内に取得できませんでした: ${path}`);
       }
       Atomics.wait(pause, 0, 0, 10);

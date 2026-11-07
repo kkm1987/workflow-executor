@@ -2,8 +2,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export function usage(dir, cli = 'codex') {
+  return tokenMetrics(dir, cli).usage;
+}
+
+export function tokenMetrics(dir, cli) {
   const path = join(dir, 'codex.jsonl');
   const totals = { input_tokens: null, cached_input_tokens: null, output_tokens: null };
+  const metrics = { usage: totals };
   const missing = new Set();
   if (cli === 'claude') {
     try {
@@ -16,13 +21,16 @@ export function usage(dir, cli = 'codex') {
       if (integer(value?.cache_read_input_tokens)) totals.cached_input_tokens = value.cache_read_input_tokens;
       if (integer(value?.output_tokens)) totals.output_tokens = value.output_tokens;
     } catch {}
-    return totals;
+    return metrics;
   }
-  if (!existsSync(path)) return totals;
+  if (!existsSync(path)) return metrics;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     let event;
     try { event = JSON.parse(line); } catch { continue; } // 中断時の末尾を許容する。
-    if (event.type !== 'turn.completed') continue;
+    if (event?.type === 'turn.completed' || event?.type === 'turn.failed') {
+      if (event.thread_usage) metrics.threadUsage = event.thread_usage;
+    }
+    if (event?.type !== 'turn.completed') continue;
     for (const key of Object.keys(totals)) {
       const value = event.usage?.[key];
       if (Number.isSafeInteger(value) && value >= 0) totals[key] = (totals[key] ?? 0) + value;
@@ -30,7 +38,7 @@ export function usage(dir, cli = 'codex') {
     }
   }
   for (const key of missing) totals[key] = null;
-  return totals;
+  return metrics;
 }
 
 export function performanceReport(state) {

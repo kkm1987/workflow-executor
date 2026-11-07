@@ -40,7 +40,10 @@ try {
       (command === 'model' && ![3, 4].includes(args.length)) ||
       (command === 'fallback' && (![3, 4].includes(args.length) || (args[2] === '--disable' && args.length !== 3))) ||
       (['approve', 'close'].includes(command) && ![1, 2].includes(args.length))) throw new Error(help);
-    if (command === 'status') dashboard();
+    if (command === 'status') {
+      try { dashboard(); }
+      catch (error) { console.error(`ダッシュボードを更新できませんでした: ${error.message}`); }
+    }
     let state;
     if (['start', 'start-change'].includes(command)) {
       const target = args.shift();

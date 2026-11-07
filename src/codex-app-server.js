@@ -39,6 +39,8 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
   let pending = '';
   let threadId;
   let turnId;
+  let turnStarted = false;
+  let startUsage;
   let tokenUsage;
   let finalMessage;
   let finished = false;
@@ -103,23 +105,37 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
         continue;
       } else if (method === 'turn/started') {
         turnId = params.turn.id;
+        turnStarted = true;
         emit({ type: 'turn.started' });
         if (interrupted) interrupt();
       } else if (method === 'thread/tokenUsage/updated') {
-        tokenUsage = params.tokenUsage.total;
+        const { total } = params.tokenUsage;
+        if (turnStarted) tokenUsage = total;
+        else startUsage = total;
       } else if (method === 'error') {
         // 自動再試行される途中のエラーはexecでも最終失敗として扱わない。
         if (!params.willRetry) emit({ type: 'error', ...params });
       } else if (method === 'turn/completed') {
         finished = true;
+        const threadUsage = tokenUsage ? {
+          input_tokens: tokenUsage.inputTokens, cached_input_tokens: tokenUsage.cachedInputTokens, output_tokens: tokenUsage.outputTokens,
+        } : undefined;
         if (params.turn.status === 'completed') {
-          emit({ type: 'turn.completed', usage: tokenUsage ? {
-            input_tokens: tokenUsage.inputTokens, cached_input_tokens: tokenUsage.cachedInputTokens, output_tokens: tokenUsage.outputTokens,
-          } : undefined });
+          const difference = key => {
+            const baseline = startUsage ? startUsage[key] : thread.threadId ? undefined : 0;
+            const total = tokenUsage?.[key];
+            return Number.isSafeInteger(baseline) && Number.isSafeInteger(total) && total >= baseline ? total - baseline : null;
+          };
+          const usage = {
+            input_tokens: difference('inputTokens'),
+            cached_input_tokens: difference('cachedInputTokens'),
+            output_tokens: difference('outputTokens'),
+          };
+          emit({ type: 'turn.completed', usage, thread_usage: threadUsage });
           if (finalMessage === undefined) fail(new Error('Codexの構造化出力がありません'));
           else { output(finalMessage); complete(); }
         } else {
-          emit({ type: 'turn.failed', error: params.turn.error ?? { message: params.turn.status } });
+          emit({ type: 'turn.failed', error: params.turn.error ?? { message: params.turn.status }, thread_usage: threadUsage });
           complete();
         }
       }

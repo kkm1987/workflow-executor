@@ -8,24 +8,27 @@ import { usage } from '../src/metrics.js';
 import { execItem, codexSession } from '../src/codex-app-server.js';
 import { fakeCodex } from './fixtures/codex.js';
 
-function fixture(t, body) {
+function fixture(t, body, onResume) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'rpc-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const target = join(dir, 'target'); mkdirSync(target);
   const state = create(target, '試験', join(dir, 'data'));
   state.stage = 'review';
-  const fake = join(target, 'fake.cjs'); fakeCodex(fake, body);
+  const fake = join(target, 'fake.cjs'); fakeCodex(fake, body, onResume);
   const attempt = join(dir, 'attempt'); mkdirSync(attempt);
   return { state, attempt, run: () => runAgent(state, attempt, process.execPath, [fake]) };
 }
 const lines = (attempt, file) => readFileSync(join(attempt, file), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
-test('RPCの初期化・再開・承認方針・スキーマ・effortと最終応答・累積usageを維持する', async t => {
+test('RPCの初期化・再開・承認方針・スキーマ・effortと最終応答を維持し、復元分のusageを除く', async t => {
   const { state, attempt, run } = fixture(t, `
     notify('unknown', { value: '生ログのみ' });
     notify('item/completed', { item: { type: 'agentMessage', id: 'comment', text: '日本語の報告' } });
     notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 17, cachedInputTokens: 4, outputTokens: 6 } } });
-    finish({ summary: '最後' });`);
+    finish({ summary: '最後' });`, `
+    notify('thread/tokenUsage/updated', { threadId: 'old', tokenUsage: { total: { inputTokens: 6, cachedInputTokens: 1, outputTokens: 2 } } });
+    notify('thread/tokenUsage/updated', { threadId: 'old', tokenUsage: { total: { inputTokens: 10, cachedInputTokens: 3, outputTokens: 5 } } });
+    notify('thread/tokenUsage/updated', { threadId: 'child', tokenUsage: { total: { inputTokens: 99, cachedInputTokens: 99, outputTokens: 99 } } });`);
   state.attemptAssignment = { cli: 'codex', model: 'gpt-6-luna', effort: 'high' };
   state.session = { ...state.attemptAssignment, stage: 'review', sessionId: 'old' };
   state.answers = [{ answer: '回答' }];
@@ -41,9 +44,28 @@ test('RPCの初期化・再開・承認方針・スキーマ・effortと最終�
   assert.equal(turn.params.effort, 'high');
   assert.ok(turn.params.outputSchema.required.includes('outcome'));
   assert.equal(turn.params.input[0].text, '回答');
-  assert.deepEqual(usage(attempt), { input_tokens: 17, cached_input_tokens: 4, output_tokens: 6 });
+  assert.deepEqual(usage(attempt), { input_tokens: 7, cached_input_tokens: 1, output_tokens: 1 });
+  assert.deepEqual(lines(attempt, 'codex.jsonl').at(-1).thread_usage, { input_tokens: 17, cached_input_tokens: 4, output_tokens: 6 });
   assert.equal(lines(attempt, 'codex.jsonl')[0].thread_id, 'old');
   assert.doesNotMatch(readFileSync(join(attempt, 'codex.jsonl'), 'utf8'), /生ログのみ/);
+});
+
+for (const [name, baseline, expected] of [
+  ['負の差分', { inputTokens: 20, cachedInputTokens: 4, outputTokens: 5 }, { input_tokens: null, cached_input_tokens: 0, output_tokens: 1 }],
+  ['復元通知なし', null, { input_tokens: null, cached_input_tokens: null, output_tokens: null }],
+]) test(`再開時の${name}を未取得とする`, async t => {
+  const { state, attempt, run } = fixture(t, `
+    notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 17, cachedInputTokens: 4, outputTokens: 6 } } });
+    finish({});`, baseline ? `
+    notify('thread/tokenUsage/updated', { threadId: 'old', tokenUsage: { total: ${JSON.stringify(baseline)} } });` : '');
+  state.attemptAssignment = { cli: 'codex', model: 'gpt-6-luna', effort: 'high' };
+  state.session = { ...state.attemptAssignment, stage: 'review', sessionId: 'old' };
+  state.answers = [{ answer: '回答' }];
+  await run();
+  const event = lines(attempt, 'codex.jsonl').at(-1);
+  assert.deepEqual(event.usage, expected);
+  assert.deepEqual(usage(attempt), expected);
+  assert.deepEqual(event.thread_usage, { input_tokens: 17, cached_input_tokens: 4, output_tokens: 6 });
 });
 
 test('既知itemをexec形式へ変換し未知itemを除外する', () => {
@@ -94,6 +116,7 @@ for (const status of ['completed', 'failed']) test(`サブエージェントのt
     }, 50);`);
   assert.deepEqual(await run(), { summary: '親' });
   assert.deepEqual(usage(attempt), { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 });
+  assert.deepEqual(lines(attempt, 'codex.jsonl').at(-1).thread_usage, { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 });
   assert.equal(lines(attempt, 'codex.jsonl').filter(entry => entry.type === 'turn.started').length, 1);
 });
 

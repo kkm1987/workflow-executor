@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs';
 
-export function fakeCodex(path, onTurn) {
+export function fakeCodex(path, onTurn, onResume = '') {
   writeFileSync(path, `
     const fs = require('node:fs');
     const send = value => console.log(JSON.stringify(value));
@@ -13,6 +13,9 @@ export function fakeCodex(path, onTurn) {
       const message = JSON.parse(line);
       if (message.method === 'initialize') send({ id: message.id, result: {} });
       if (['thread/start', 'thread/resume'].includes(message.method)) send({ id: message.id, result: { thread: { id: message.params.threadId ?? 'fake' } } });
+      if (message.method === 'thread/resume') {
+        ${onResume}
+      }
       if (message.method === 'turn/start') {
         send({ id: message.id, result: { turn: { id: 'turn' } } });
         notify('turn/started', { turn: { id: 'turn' } });

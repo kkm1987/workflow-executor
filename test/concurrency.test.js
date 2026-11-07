@@ -180,6 +180,28 @@ function filesUnder(path) {
     .map(x => { const file = join(x.parentPath, x.name); return [file, readFileSync(file, 'utf8')]; }));
 }
 
+test('共有ロックを取得できなくてもstatusは保存済みの状態を表示する', { timeout: 20000 }, async t => {
+  const { dir, base, a } = fixture(t);
+  const cli = isolatedCli(dir);
+  const state = create(a, '保存済みの案件', base);
+  reserve(base, () => ({ id: state.id, paths: [a] }));
+  const lock = join(base, 'shared-update.lock');
+  writeFileSync(lock, JSON.stringify({ pid: 2147483647, token: randomUUID(), startedAt: new Date(0).toISOString() }));
+  const before = filesUnder(base);
+
+  for (const args of [[state.id], []]) {
+    const result = await cli('status', ...args);
+    assert.equal(result.code, 0, result.err);
+    assert.equal(result.err.trim(), `ダッシュボードを更新できませんでした: 共有更新ロックを5秒以内に取得できませんでした: ${lock}`);
+    const output = JSON.parse(result.out);
+    if (!args.length) assert.equal(output.length, 1);
+    const shown = args.length ? output : output[0];
+    assert.equal(shown.id, state.id);
+    assert.equal(shown.status, state.status);
+    assert.deepEqual(filesUnder(base), before);
+  }
+});
+
 test('全CLI更新は競合時にstate・events・attemptを変更せず、grant追加先と共有ストアも保護する', { timeout: 30000 }, async t => {
   const { dir, base, a, b } = fixture(t);
   const cli = isolatedCli(dir);

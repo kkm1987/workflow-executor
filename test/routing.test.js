@@ -10,6 +10,7 @@ import { codexArgs, codexThread, claudeArgs, runAgent, step, run, resumeSession,
 import { preflight, checkGrantAccess } from '../src/preflight.js';
 import { parseCodexLimits, parseClaudeLimits, insufficient, limitError } from '../src/limits.js';
 import { usage, performanceReport } from '../src/metrics.js';
+import { fakeCodex } from './fixtures/codex.js';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
@@ -373,6 +374,43 @@ test('CodexとClaudeのusage・割り当て・セッション・前後利用枠�
   assert.equal(report.attempts[0].beforeLimits.primary.usedPercent, 0);
   assert.equal(report.attempts[0].afterLimits.primary.usedPercent, 1);
   assert.equal(report.attempts[1].model, 'claude-opus-5-5');
+});
+
+test('同じCodexセッションを2回再開した案件では各試行のusageだけを合計する', async t => {
+  const { dir, target, base } = fixture(t);
+  const state = create(target, '試験', base);
+  const fake = join(dir, 'codex.cjs');
+  const totals = [
+    { inputTokens: 20, cachedInputTokens: 10, outputTokens: 5 },
+    { inputTokens: 35, cachedInputTokens: 10, outputTokens: 12 },
+    { inputTokens: 50, cachedInputTokens: 20, outputTokens: 15 },
+  ];
+  const expected = [
+    { input_tokens: 20, cached_input_tokens: 10, output_tokens: 5 },
+    { input_tokens: 15, cached_input_tokens: 0, output_tokens: 7 },
+    { input_tokens: 15, cached_input_tokens: 10, output_tokens: 3 },
+  ];
+  for (const [index, total] of totals.entries()) {
+    const result = index < 2 ? { ...ok, outcome: 'question', question: '入力形式は？' } : ok;
+    fakeCodex(fake, `
+      notify('thread/tokenUsage/updated', { tokenUsage: { total: ${JSON.stringify(total)} } });
+      finish(${JSON.stringify(result)});`, index ? `
+      notify('thread/tokenUsage/updated', { threadId: message.params.threadId, tokenUsage: { total: ${JSON.stringify(totals[index - 1])} } });` : '');
+    let attempt;
+    await step(state, (current, path) => {
+      attempt = path;
+      return runAgent(current, path, process.execPath, [fake]);
+    }, base, passed, noLimits);
+    const metric = JSON.parse(readFileSync(join(attempt, 'metrics.json'), 'utf8'));
+    assert.equal(metric.sessionId, 'fake');
+    assert.equal(metric.resumed, index > 0);
+    assert.deepEqual(metric.usage, expected[index]);
+    assert.deepEqual(metric.threadUsage, { input_tokens: total.inputTokens, cached_input_tokens: total.cachedInputTokens, output_tokens: total.outputTokens });
+    if (index < 2) answer(state, '文字列', base);
+  }
+  const { tokens } = performanceReport(state);
+  assert.deepEqual(Object.values(tokens).map(token => token.value), [50, 20, 15]);
+  assert.ok(Object.values(tokens).every(token => token.complete));
 });
 
 test('実際のOpenSpecで候補を列挙し、候補なし・指定なしを開始前に拒否する', async t => {
