@@ -8,7 +8,7 @@ import { preflight } from './preflight.js';
 import { tokenMetrics, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
 import { resolveCodex, spawnCommand, commandSpec, windowsSandboxArgs, sandboxProfileArgs, resolveGitBash } from './commands.js';
-import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, taskGate } from './changes.js';
+import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, writablePaths, taskGate } from './changes.js';
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
@@ -50,7 +50,7 @@ export function codexThread(state) {
     ...(value.model ? { model: value.model } : {}), ...(session ? { threadId: session.sessionId } : {}) };
 }
 
-export const writablePaths = state => [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+export { writablePaths };
 
 export function codexArgs(state) {
   const value = attemptAssignment(state);
@@ -111,7 +111,7 @@ function gateContext(state, dir) {
   return { state: { stage: state.stage, target: state.target, answers: state.answers.slice(-1), grants: state.grants ?? {}, approval: state.approval, tasks: state.tasks },
     attempt: state.attempts, scope: attemptScope(state), writable: [state.target, ...writablePaths(state)], dir, review: readConfig().escalationReview,
     codex: { command: state.executables?.codex ?? resolveCodex() },
-    sandbox: `${[file, ...argv].map(quote).join(' ')} -- ${quote(resolveGitBash())} -c` };
+    sandbox: `${[file, ...argv].map(quote).join(' ')} -- ${quote(state.executables?.bash ?? resolveGitBash())} -c` };
 }
 
 async function invokeAgent(state, dir, command, prefix = []) {

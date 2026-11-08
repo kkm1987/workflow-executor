@@ -72,7 +72,9 @@ executeの昇格要求は次の順に判断する。`;`・`&&`・改行、ファ
 2. 計画審査: 承認済みで`gate=plan`の項目があれば、Codexの読み取り専用の別スレッドが項目とコマンド・スクリプトの中身を照合する。実行器は項目・リスク・審査前後の内容を検証し、今回1回だけ許可する。結果は保存しない。失敗・タイムアウト・判断不能は所有者へ回す。`workflow.config.json`の`escalationReview`でモデルを指定し、`null`で無効にできる。担当によらず常にCodexで行う。
 3. 所有者: 拒否して権限要求を返す。
 
-Claudeのexecuteも同じ制約で動く。`PreToolUse`フックが`Bash`を`codex sandbox`で包み、先頭行が`# workflow-escalate: <理由>`の場合だけ2行目を同じ順に判断する。`Edit`・`Write`は対象・許可パス・changeディレクトリの外と`.git`への書き込みを拒否する。フックが動作しない場合は実行前確認で`failed`になる。Windowsでは`Bash`にGit Bashが必要で、`CLAUDE_CODE_GIT_BASH_PATH`で指定できる。
+Claudeのexecuteも同じ制約で動く。`PreToolUse`フックが`Bash`を`codex sandbox`で包み、先頭行が`# workflow-escalate: <理由>`の場合だけ2行目を同じ順に判断する。`Edit`・`Write`は対象・許可パス・changeディレクトリの外と`.git`への書き込みを拒否する。フックが動作しない場合は実行前確認で`failed`になる。
+
+Windowsでは、`CLAUDE_CODE_GIT_BASH_PATH`、`PATH`上の`bash.exe`（System32とWindowsAppsを除く）、`PATH`上の`git.exe`から求めたGitの導入先の`bin\bash.exe`の順にGit Bashを探す。Claudeの判断フックが必要な試行では、実行前確認でGit Bashがサンドボックス内で起動できることを確かめ、記録したパスをフックでも使う。
 
 決定的な判定と計画審査で許可されないと、エージェントは`outcome=permission`で必要なコマンドを`permission.commands`に返して停止する。所有者は理由・影響と全文を確認し、`node src/cli.js grant <ID> --command "Get-CimInstance Win32_Processor"`で要求されたコマンドだけを許可する（`--command`は複数指定可）。その後`run <ID>`で同じセッションを再開し、同じコマンドを再実行する。ネットワーク・書き込みパスは従来どおり`--network`・`--path`で管理する。
 

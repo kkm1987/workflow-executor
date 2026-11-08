@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { readdirSync, statSync, existsSync } from 'node:fs';
-import { join, delimiter, resolve } from 'node:path';
+import { basename, dirname, join, delimiter, resolve } from 'node:path';
 
 export function clearCodexLaunchEnvironment(env, platform) {
   if (platform !== 'win32') return;
@@ -24,19 +24,36 @@ export function resolveCodex({ localAppData = process.env.LOCALAPPDATA, path = p
   throw new Error('Codex実行ファイルがありません。Codexを導入してください');
 }
 
-// PATHの先頭がWSLのbash.exeの場合があるため、System32とWindowsAppsを除く（sandbox内でE_ACCESSDENIEDになる）。
+export const gitBashRecovery = 'Git for Windowsを導入するか、CLAUDE_CODE_GIT_BASH_PATHにbash.exeを指定してください';
+
 export function resolveGitBash(env = process.env, platform = process.platform) {
   if (platform !== 'win32') return 'bash';
   if (env.CLAUDE_CODE_GIT_BASH_PATH) return env.CLAUDE_CODE_GIT_BASH_PATH;
-  const dirs = (env.PATH ?? '').split(delimiter).filter(dir => dir && !/[\\/](?:System32|WindowsApps)[\\/]?$/i.test(dir));
-  const found = resolveExecutable('bash', dirs.join(delimiter), platform);
-  if (!found) throw new Error('Git Bashが見つかりません');
-  return found;
+  const path = env.PATH ?? '';
+  // WSLのbash.exeはsandbox内でE_ACCESSDENIEDになる。
+  const dirs = path.split(delimiter).map(dir => dir.replace(/^"|"$/g, ''))
+    .filter(dir => dir && !/[\\/](?:System32|WindowsApps)[\\/]*$/i.test(dir));
+  const found = resolveExecutable('bash.exe', dirs.join(delimiter), platform);
+  if (found) return found;
+
+  const git = resolveExecutable('git.exe', path, platform);
+  if (git) {
+    const dir = dirname(git);
+    const parent = dirname(dir);
+    const name = basename(dir).toLowerCase();
+    if (name === 'cmd' || name === 'bin') {
+      const root = name === 'bin' && /^(?:mingw64|mingw32|clangarm64)$/i.test(basename(parent)) ? dirname(parent) : parent;
+      const bash = join(root, 'bin', 'bash.exe');
+      if (statSync(bash, { throwIfNoEntry: false })?.isFile()) return bash;
+    }
+  }
+  throw new Error(`Git Bashが見つかりません。${gitBashRecovery}`);
 }
 
 export function resolveExecutable(command, path = process.env.PATH ?? '', platform = process.platform) {
+  const names = platform === 'win32' && !command.endsWith('.exe') ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`] : [command];
   for (const dir of path.split(delimiter).filter(Boolean)) {
-    for (const name of platform === 'win32' ? [`${command}.exe`, `${command}.cmd`, `${command}.bat`] : [command]) {
+    for (const name of names) {
       const candidate = resolve(dir.replace(/^"|"$/g, ''), name);
       if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
     }

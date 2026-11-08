@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { root, create, advance, answer, approve, grant, load, prompt, summary, save, normalizeApproval, validateResult } from '../src/workflow.js';
 import { runAgent, step, claudeArgs } from '../src/executor.js';
@@ -274,6 +274,10 @@ test('Claudeのフックは通常のBashをsandboxで包み、Edit・Writeを範
 
 test('フックはClaudeのexecuteだけに付き、判断の記録はCodexと同じ形式で取り込む', async t => {
   const { target, base, state } = fixture(t);
+  const env = process.env;
+  const bash = join(target, 'checked bash.exe');
+  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: bash };
+  t.after(() => { process.env = env; });
   state.models.execute = { model: 'claude-sonnet-5-5', effort: 'medium' };
   assert.equal(gateRequired(state), true);
   assert.ok(claudeArgs(state, 'id', 'dir').includes('--settings'));
@@ -289,7 +293,23 @@ test('フックはClaudeのexecuteだけに付き、判断の記録はCodexと�
     fs.appendFileSync(path.join(path.dirname(file), 'gate.jsonl'), JSON.stringify({ time: 't', attempt: 1, stage: 'execute', task: 0, cli: 'claude', kind: 'claude/Bash', command: 'git push', commandActions: [{ type: 'unknown', command: 'git push' }], reason: 'r', cwd: 'c', decidedAt: 't', decision: 'decline', basis: 'b', layer: 3 }) + '\\n');
     console.log(JSON.stringify({ type: 'result', session_id: 's', structured_output: ${JSON.stringify(ok)} }));`);
   state.executables = { codex: 'codex.exe' };
-  await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
+  let checkedBash;
+  await step(state, async (current, dir) => {
+    process.env.CLAUDE_CODE_GIT_BASH_PATH = '別のbash.exe';
+    const result = await runAgent(current, dir, process.execPath, [fake]);
+    if (process.platform === 'win32') {
+      assert.deepEqual(checkedBash, { name: 'Git Bash', ok: true, path: bash });
+      assert.equal(current.executables.bash, checkedBash.path);
+      const context = JSON.parse(readFileSync(join(dir, 'gate-context.json'), 'utf8'));
+      assert.ok(context.sandbox.endsWith(` -- '${checkedBash.path.replaceAll('\\', '/')}' -c`));
+    }
+    return result;
+  }, base, async current => {
+    const report = await preflight(current, async (_, args) => args.includes('--settings') ? 'workflow-gate-probe' : '{"loggedIn":true}',
+      () => 'codex.exe', () => 'claude.exe');
+    checkedBash = report.checks.find(check => check.name === 'Git Bash');
+    return report;
+  }, async () => ({ limits: null, failure: null }));
   assert.equal(state.status, 'ready', state.error);
   assert.equal(state.evidence.at(-1).escalations[0].layer, 3);
   const types = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line).type);
@@ -299,6 +319,9 @@ test('フックはClaudeのexecuteだけに付き、判断の記録はCodexと�
 
 test('フックの動作を確認できなければ実行前確認で失敗する', async t => {
   const { state } = fixture(t);
+  const env = process.env;
+  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: 'bash.exe' };
+  t.after(() => { process.env = env; });
   state.models.execute = { model: 'claude-sonnet-5-5', effort: 'medium' };
   state.attemptAssignment = { cli: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' };
   const report = output => preflight(state, async (_, args) => args.includes('--settings') ? output : '{"loggedIn":true}', () => 'codex', () => 'claude');
@@ -309,7 +332,7 @@ test('フックの動作を確認できなければ実行前確認で失敗す�
   assert.match(probeSettings(), /UserPromptSubmit/);
 });
 
-test('sandboxの設定はWindowsではプロファイルで書き込み先とネットワークを渡し、WSLのbashを選ばない', () => {
+test('sandboxの設定はWindowsではプロファイルで書き込み先とネットワークを渡す', () => {
   const windows = sandboxProfileArgs('T', ['E'], true, 'win32');
   assert.ok(windows.includes('workflow-grant'));
   assert.ok(windows.includes('permissions.workflow-grant.workspace_roots={"T"=true,"E"=true}'));
@@ -317,9 +340,32 @@ test('sandboxの設定はWindowsではプロファイルで書き込み先とネ
   assert.ok(!sandboxProfileArgs('T', [], false, 'win32').some(arg => arg.includes('network.enabled')));
   const linux = sandboxProfileArgs('T', ['E'], true, 'linux');
   assert.ok(linux.includes(':workspace') && linux.includes('sandbox_workspace_write.network_access=true'));
-  assert.equal(resolveGitBash({ CLAUDE_CODE_GIT_BASH_PATH: 'x' }, 'win32'), 'x');
+});
+
+test('WindowsのGit Bashは環境変数、PATH、Gitの導入先の順に探し、WSLを除外する', t => {
+  const { dir } = fixture(t);
+  const bin = join(dir, 'bin');
+  const cmd = join(dir, 'cmd');
+  const system = join(dir, 'System32');
+  const windowsApps = join(dir, 'WindowsApps');
+  const mingw = join(dir, 'mingw64', 'bin');
+  for (const path of [bin, cmd, system, windowsApps, mingw]) mkdirSync(path, { recursive: true });
+  for (const path of [system, windowsApps]) writeFileSync(join(path, 'bash.exe'), '');
+  for (const path of [cmd, mingw]) writeFileSync(join(path, 'git.exe'), '');
+  const wsl = [`"${system}"`, windowsApps].join(delimiter);
+  const resolve = (...paths) => resolveGitBash({ PATH: paths.join(delimiter) }, 'win32');
+  const recovery = /Git Bash.*Git for Windows.*CLAUDE_CODE_GIT_BASH_PATH/;
+  assert.throws(() => resolve(wsl), recovery);
+  assert.throws(() => resolve(wsl, cmd), recovery);
+  const bash = join(bin, 'bash.exe');
+  writeFileSync(bash, '');
+  assert.equal(resolve(wsl, cmd), bash);
+  assert.equal(resolve(wsl, mingw), bash);
+  const pathBash = join(dir, 'bash.exe');
+  writeFileSync(pathBash, '');
+  assert.equal(resolve(cmd, dir), pathBash);
+  assert.equal(resolveGitBash({ PATH: [cmd, dir].join(delimiter), CLAUDE_CODE_GIT_BASH_PATH: 'x' }, 'win32'), 'x');
   assert.equal(resolveGitBash({}, 'linux'), 'bash');
-  assert.throws(() => resolveGitBash({ PATH: 'C:\\Windows\\System32' }, 'win32'), /Git Bash/);
 });
 
 test('状態の詳細は読み込み後も承認項目のIDを返し、スキーマは差分の項目を持つ', t => {

@@ -14,6 +14,7 @@ export const separateOpenSpec = state => state.kind === 'change' && resolve(open
 export const storeArgs = state => openSpecRoot(state).store ? ['--store', openSpecRoot(state).store] : [];
 export const changeDirectories = state => (state.change ? [state.change] : state.candidates.map(item => item.name))
   .map(name => join(openSpecRoot(state).root, 'openspec', 'changes', name));
+export const writablePaths = state => [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
 
 export function taskGate(state) {
   if (!validChangeName(state.change)) throw new Error('change名が不正です');

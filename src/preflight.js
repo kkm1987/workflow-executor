@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process';
 import { statSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
-import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
-import { resolveCodex, resolveExecutable, spawnCommand, windowsSandboxArgs, sandboxProfileArgs } from './commands.js';
+import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories, writablePaths } from './changes.js';
+import { resolveCodex, resolveExecutable, resolveGitBash, gitBashRecovery, spawnCommand, windowsSandboxArgs, sandboxProfileArgs } from './commands.js';
 import { assignment, attemptAssignment, stagesFor } from './config.js';
 import { probeSettings, gateRequired, PROBE_MARKER } from './claude-gate.js';
 
@@ -128,6 +128,18 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       report.checks.push({ name, ok: true });
     }
     if (state.attemptAssignment && gateRequired(state)) {
+      if (process.platform === 'win32') {
+        name = 'Git Bash';
+        const bash = resolveGitBash();
+        try {
+          await check(codex, ['sandbox', ...sandboxProfileArgs(state.target, writablePaths(state), Boolean(state.grants?.network)),
+            '--', bash, '-c', 'exit 0'], state.target);
+        } catch (error) {
+          throw new Error(`${error.code ?? error.message}。${gitBashRecovery}`);
+        }
+        report.executables.bash = bash;
+        report.checks.push({ name, ok: true, path: bash });
+      }
       name = 'Claudeの判断フック';
       // UserPromptSubmitのblockはモデルを呼ばずにフックの読み込みを確かめられる。
       const output = await check(report.executables.claude, ['-p', 'probe', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',

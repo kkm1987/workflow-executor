@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { root, create, load, setModel, setFallback, save, answer, retry, summary } from '../src/workflow.js';
 import { assignment, attemptAssignment, fallbackAssignment, readConfig, validateAssignments } from '../src/config.js';
 import { step, run, runAgent, inputFor, resumeSession, codexArgs, claudeArgs } from '../src/executor.js';
 import { preflight, checkGrantAccess } from '../src/preflight.js';
+import { sandboxProfileArgs } from '../src/commands.js';
 import { fakeCodex } from './fixtures/codex.js';
 
 const codex = { model: 'gpt-6-luna', effort: 'high' };
@@ -216,6 +217,9 @@ test('代替確認の失敗はfailed・0試行、未選択CLIは未確認、同�
 
 test('選択CLIの権限確認と双方向の引数は承認・許可・工程制限を保持する', async t => {
   const { target, base } = fixture(t);
+  const env = process.env;
+  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: join(target, 'bash.exe') };
+  t.after(() => { process.env = env; });
   const state = create(target, '要求', base);
   state.grants = { paths: [base], network: true };
   state.approval = { status: 'approved', items: [{ tasks: '実装', action: '検証', limits: '対象内', stopWhen: '失敗' }], conditions: '条件を保持' };
@@ -241,13 +245,55 @@ test('選択CLIの権限確認と双方向の引数は承認・許可・工程�
       if (stage === 'execute') {
         let accessChecks = 0;
         const report = await preflight(state, async (_, args) => {
-          if (args[0] === 'sandbox' && args.includes('workflow-grant')) accessChecks++;
+          if (args[0] === 'sandbox' && args.includes('workflow-grant') && !args.includes('exit 0')) accessChecks++;
           return args.includes('--settings') ? 'workflow-gate-probe' : '{"loggedIn":true}';
         }, () => 'codex', () => 'claude', async () => JSON.stringify({ root: { path: target } }));
         assert.equal(report.ok, true);
         if (process.platform === 'win32') assert.equal(accessChecks, value.cli === 'codex' ? 1 : 0);
       }
     }
+  }
+});
+
+test('Git Bashの不備はClaude代替の試行前に記録し、Codexだけの試行は続行する', { skip: process.platform !== 'win32' }, async t => {
+  const { target, base } = fixture(t);
+  const env = process.env;
+  process.env = { ...env, PATH: target, CLAUDE_CODE_GIT_BASH_PATH: '' };
+  t.after(() => { process.env = env; });
+  const bash = join(target, 'bash.exe');
+  const recovery = /Git Bash.*Git for Windows.*CLAUDE_CODE_GIT_BASH_PATH/;
+  for (const mode of ['missing', 'sandbox failure', 'codex']) {
+    if (mode === 'sandbox failure') process.env.CLAUDE_CODE_GIT_BASH_PATH = bash;
+    if (mode === 'codex') process.env.CLAUDE_CODE_GIT_BASH_PATH = '';
+    const state = create(target, '要求', base, undefined, { models: { execute: codex }, fallbacks: { execute: claude } });
+    Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }] });
+    const argsSeen = [];
+    let models = 0;
+    await step(state, async () => { models++; return ok; }, base, current => preflight(current, async (_, args) => {
+      argsSeen.push(args);
+      if (args.includes('exit 0')) throw new Error('アクセス拒否 (終了コード 1)');
+      return '{"loggedIn":true}';
+    }, () => 'codex', () => 'claude'), async (_, value) => ({
+      limits: mode === 'codex' || value.cli === 'claude' ? enough : low, failure: null,
+    }));
+    const dir = join(base, state.id);
+    const records = readdirSync(dir).filter(name => name.startsWith('preflight-'))
+      .map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')));
+    const checks = records.flatMap(record => record.checks).filter(check => check.name === 'Git Bash');
+    assert.equal(argsSeen.some(args => args.includes('--settings')), false);
+    if (mode === 'codex') {
+      assert.equal(models, 1);
+      assert.notEqual(state.status, 'failed');
+      assert.deepEqual(checks, []);
+    } else {
+      assert.equal(models, 0);
+      assert.equal(state.attempts, 0);
+      assert.equal(state.status, 'failed');
+      assert.match(state.error, recovery);
+      assert.deepEqual(checks, [{ name: 'Git Bash', ok: false, error: state.error }]);
+    }
+    assert.deepEqual(argsSeen.filter(args => args.includes('exit 0')), mode === 'sandbox failure'
+      ? [['sandbox', ...sandboxProfileArgs(target, []), '--', bash, '-c', 'exit 0']] : []);
   }
 });
 
