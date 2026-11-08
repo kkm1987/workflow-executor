@@ -464,7 +464,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     if (inquiry) resolveInquiry(state, result);
     else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base) });
     if (state.status !== 'waiting') delete state.session;
-    if (state.status === 'waiting' && (inquiry || result.outcome !== 'partial') && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
+    if (state.status === 'waiting' && (inquiry || !['partial', 'replan'].includes(result.outcome)) && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
     event(state, state.status === 'completed' ? 'completed' : state.status === 'failed' ? 'failed' : 'finished', result, base);
   } catch (error) {

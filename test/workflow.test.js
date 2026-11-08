@@ -42,18 +42,92 @@ const prereviewResult = (approvals = [], retainedApprovals = []) => ({ ...ok([ta
   decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要', granularity: '同じモジュールを同じ試験で確認' } });
 
 test('replanはexecute専用で、セッションを破棄し手戻りに数えない', t => {
-  const { state } = fixture(t);
   const result = { ...ok(), outcome: 'replan' };
   assert.ok(JSON.parse(readFileSync(join(root, 'src/result.schema.json'))).properties.outcome.enum.includes('replan'));
   for (const stage of ['plan', 'prereview', 'review', 'acceptance']) assert.throws(() => validateResult(result, stage));
   for (const kind of ['request', 'change']) {
+    const { state } = fixture(t);
     Object.assign(state, { kind, stage: 'execute', revisions: 3, session: { sessionId: 'old' } });
     advance(state, result);
     assert.equal(state.stage, kind === 'change' ? 'prereview' : 'plan');
     assert.equal(state.status, 'ready');
+    assert.equal(state.replans, 1);
     assert.equal(state.revisions, 3);
     assert.equal(state.session, undefined);
   }
+});
+
+test('所有者の回答なしでreplanが2回続くと待機し、回答後に再び実行前レビューへ戻れる', async t => {
+  const { state, base } = fixture(t);
+  Object.assign(state, { kind: 'change', stage: 'execute', revisions: 3 });
+  advance(state, { ...ok(), outcome: 'replan', summary: '全体でのみテストが失敗' });
+  assert.equal(state.stage, 'prereview');
+  advance(state, prereviewResult());
+  const result = { ...ok(), outcome: 'replan', summary: '修正後も全体でテストが失敗' };
+  await step(state, async (_current, dir) => {
+    writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: 'replan-session' }));
+    return result;
+  }, base);
+  const saved = load(state.id, base);
+  assert.equal(saved.stage, 'execute');
+  assert.equal(saved.status, 'waiting');
+  assert.equal(saved.replans, 2);
+  assert.equal(saved.revisions, 3);
+  assert.equal(saved.session, undefined);
+  for (const text of [result.summary, '指示を加えて計画を見直す', '検証の省略や変更を回答する', 'close']) {
+    assert.ok(saved.question.includes(text), text);
+  }
+
+  answer(saved, '失敗の詳細は？', base, true);
+  assert.equal(saved.replans, 2);
+  resolveInquiry(saved, { outcome: 'question', question: '全体実行の終了時に失敗しました' });
+  answer(saved, '検証を単独実行に変更する', base);
+  assert.equal(load(saved.id, base).replans, undefined);
+  advance(saved, { ...result, summary: '所有者の回答に沿って単独実行に変更する' });
+  assert.equal(saved.stage, 'prereview');
+  assert.equal(saved.status, 'ready');
+  assert.equal(saved.replans, 1);
+  assert.equal(saved.revisions, 3);
+});
+
+test('原因不明の検証の失敗は再試行でもerrorにしないよう指示する', t => {
+  const { state } = fixture(t);
+  state.stage = 'execute';
+  const input = prompt(state);
+  assert.match(input, /対象のコードを変えずに解消できる実行器・ツール・環境の問題と明確に判断できる場合だけoutcome=error/);
+  assert.match(input, /明確に判断できない失敗はerrorにしない/);
+  assert.match(input, /failures.*同じ基準でerrorか検証の失敗かを判断する/);
+});
+
+test('検証の不具合は範囲内で直すか実行前レビューへ戻すよう指示する', t => {
+  const { state } = fixture(t);
+  Object.assign(state, { kind: 'change', stage: 'execute', taskStartAttempt: 1,
+    evidence: [{ attempt: 1, changedFiles: ['src/feature.js'] }] });
+  const input = prompt(state);
+  assert.match(input, /targetのタスクだけを実装し.*ただし、検証で見つけた不具合の原因がこのchangeの差分にあり、今のdesign・specの範囲で直せる場合は、質問や差し戻しをせずその場で直して検証を続ける/);
+  assert.match(input, /summaryに直したファイルと、直したコードを作ったもとのタスクの番号/);
+  assert.match(input, /changeの範囲外、design・spec・tasksの変更が必要、または原因を判断できない場合は、tasks.mdを編集せずoutcome=replan/);
+  assert.match(input, /失敗の場所、単独と全体での再現の有無、ログの保存先、このchangeの変更ファイルとの重なり/);
+  assert.match(input, /所有者が計画の見直しを指示した場合も同様/);
+  assert.deepEqual(JSON.parse(input.split('\n').at(-1)).evidence, state.evidence);
+});
+
+test('実行前レビューは戻された不具合を解析し、計画の更新・質問・errorで応じるよう指示する', t => {
+  const { state } = fixture(t);
+  state.stage = 'prereview';
+  const input = prompt(state);
+  assert.match(input, /previousがexecuteから戻された不具合の報告なら、報告とログを解析する/);
+  assert.match(input, /失敗した検証の前に修正タスクを足し、解析に重い実行が必要なら調査タスクを足す/);
+  assert.match(input, /tasks.mdと未完了タスクの一覧に反映/);
+  assert.match(input, /業務判断が必要ならoutcome=question、対象のコードを変えずに解消できる環境の問題だと判明したらoutcome=error/);
+});
+
+test('独立レビューは検証タスクで修正したコードをもとの受け入れ条件でも確認するよう指示する', t => {
+  const { state } = fixture(t);
+  state.stage = 'review';
+  const input = prompt(state);
+  assert.match(input, /検証タスクで直した差分.*対象タスクのresult（executeのsummary）.*もとのタスクの番号.*その受け入れ条件も確認する/);
+  assert.match(input, /満たしていなければoutcome=reviseとし、指摘にもとのタスクの番号と崩れた条件を書く/);
 });
 
 test('検証の省略・変更の指示と根拠の回答番号を渡す', t => {

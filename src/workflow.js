@@ -176,6 +176,12 @@ export function advance(state, result, { reviews = {}, log = () => {} } = {}) {
   }
   delete state.partials;
   if (result.outcome === 'replan') {
+    state.replans = (state.replans ?? 0) + 1;
+    if (state.replans >= 2) {
+      state.status = 'waiting';
+      state.question = `所有者の回答を挟まずに再計画が2回続きました。最新の報告: ${result.summary}\n指示を加えて計画を見直す: 指示を回答し、未完了タスクの計画を見直します。\n検証の省略や変更を回答する: 回答に沿って検証タスクと受け入れ条件を見直します。\nclose: 案件を終了し、途中の変更は残します。どの対応にしますか？`;
+      return;
+    }
     state.stage = state.kind === 'change' ? 'prereview' : 'plan';
     state.status = 'ready';
     return;
@@ -477,9 +483,12 @@ export function answer(state, text, base = dataRoot, inquiry = false) {
     else delete state.approval;
     state.stage = 'prereview';
   }
-  if (!inquiry) state.question = '';
+  if (!inquiry) {
+    state.question = '';
+    delete state.permission;
+    delete state.replans;
+  }
   state.idlePartials = 0;
-  if (!inquiry) delete state.permission;
   state.status = 'ready';
   event(state, 'answered', state.answers.at(-1), base);
   save(state, base);
@@ -643,9 +652,9 @@ export function prompt(state, at = Date.now()) {
   const planning = ['plan', 'prereview'].includes(state.stage);
   const instruction = {
     plan: '要求整理→粒度判定→設計判定の順に行う。decisions.requirementsに要求と受け入れ条件の判断根拠、decisions.granularityに未完了タスクの粒度と順序の根拠、decisions.architectureに既存構成に基づく最も単純な設計の根拠を記す。差し戻し理由を反映し、検証可能な受け入れ条件を持つ未完了タスクを定義する。',
-    prereview: '検証の省略・変更は確認の質問を除く所有者の回答に基づく場合だけ記録する。answersの番号は配列の1始まり（回答#1が先頭）である。省略したタスクは - [x] <番号> ~~<元の記述>~~ 省略（所有者の判断: 回答#<n>、<理由>） とし、受け入れ条件から省略した検証を外す。検証方法の変更ではタスクと受け入れ条件を新しい方法に書き換える。作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する。候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。ユーザーの作業（ビルド、実機・手動確認、外部での承認や操作）が必要なタスクは、依存関係と検証可能性を損なわない範囲で、先行するソースコード変更をまとめてから一度に依頼する順序と粒度にする。承認計画の項目も同じ操作はまとめる。decisions.applicabilityにユーザーへの依頼回数とその根拠を書く。',
-    execute: '検証を自らの判断で省略しない。所有者が検証の省略・変更を回答したらtasks.mdと受け入れ条件を編集せずoutcome=replanとし、summaryに回答の要旨を書く。targetのタスクだけを実装し、tasks.mdのチェック状態で対象を決めず、必要な検証を行う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。コマンドの昇格が拒否された場合も回避せずoutcome=permissionとし、permission.commandsにシェル内の完全なコマンド、questionに必要な理由と許可しない場合の影響を書く。許可後は要求したコマンドを変更せず同じ文字列で再実行する。昇格では`;`・`&&`・改行を引用符内でも拒否し、パイプは全文一致でのみ許可する。連結が必要な処理は対象内のスクリプトにして、その実行を1コマンドで要求する（中身が承認済みの計画と照合される）。許可されるまで推測で回避しない。',
-    review: '検証を自らの判断で省略しない。受け入れ条件の検証が未実施ならreviseとする。targetのタスクの実装だけを独立してレビューする。tasks.mdのチェック状態で対象を決めない。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
+    prereview: '検証の省略・変更は確認の質問を除く所有者の回答に基づく場合だけ記録する。answersの番号は配列の1始まり（回答#1が先頭）である。省略したタスクは - [x] <番号> ~~<元の記述>~~ 省略（所有者の判断: 回答#<n>、<理由>） とし、受け入れ条件から省略した検証を外す。検証方法の変更ではタスクと受け入れ条件を新しい方法に書き換える。作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する。候補から次のchangeを選定し、現在のコード・既存仕様・他のchange・実行環境と照合して実行可否を判断する。必要な調査と技術的決定は自ら行い、業務判断だけ質問する。previousがexecuteから戻された不具合の報告なら、報告とログを解析する。直し方が分かれば失敗した検証の前に修正タスクを足し、解析に重い実行が必要なら調査タスクを足す。追加したタスクはtasks.mdと未完了タスクの一覧に反映する。業務判断が必要ならoutcome=question、対象のコードを変えずに解消できる環境の問題だと判明したらoutcome=errorを返す。指定changeがあればそれを使う。changeに名前、decisions.selection・applicability・updatesに各根拠を書く。現状と合わない場合だけ対象changeのディレクトリ内を更新する。順序付きタスク群と受け入れ条件を返す。ユーザーの作業（ビルド、実機・手動確認、外部での承認や操作）が必要なタスクは、依存関係と検証可能性を損なわない範囲で、先行するソースコード変更をまとめてから一度に依頼する順序と粒度にする。承認計画の項目も同じ操作はまとめる。decisions.applicabilityにユーザーへの依頼回数とその根拠を書く。',
+    execute: '検証を自らの判断で省略しない。所有者が検証の省略・変更を回答したらtasks.mdと受け入れ条件を編集せずoutcome=replanとし、summaryに回答の要旨を書く。所有者が計画の見直しを指示した場合も同様に扱い、検証の失敗報告があればsummaryに引き継ぐ。targetのタスクだけを実装し、tasks.mdのチェック状態で対象を決めず、必要な検証を行う。ただし、検証で見つけた不具合の原因がこのchangeの差分にあり、今のdesign・specの範囲で直せる場合は、質問や差し戻しをせずその場で直して検証を続ける。summaryに直したファイルと、直したコードを作ったもとのタスクの番号を書く。明確な環境の問題や権限要求に該当せず、検証の失敗がchangeの範囲外、design・spec・tasksの変更が必要、または原因を判断できない場合は、tasks.mdを編集せずoutcome=replanを返す。summaryに失敗の場所、単独と全体での再現の有無、ログの保存先、このchangeの変更ファイルとの重なりを書く。原因の判断にはevidenceのchangedFilesも使う。summaryに変更ファイル、検証結果、残る問題を書く。タスク群が大きく1回で終わらない場合は、完了した分のtasks.mdを更新してからoutcome=partialとし、summaryに進捗と残りを書く（未完了のままok・reviewへ進めない）。サンドボックスのネットワーク遮断やワーキングディレクトリ外アクセスの拒否で止まった場合は、outcome=permissionとし、questionに理由、permission.networkとpermission.pathsに必要な最小限の許可を書く。コマンドの昇格が拒否された場合も回避せずoutcome=permissionとし、permission.commandsにシェル内の完全なコマンド、questionに必要な理由と許可しない場合の影響を書く。許可後は要求したコマンドを変更せず同じ文字列で再実行する。昇格では`;`・`&&`・改行を引用符内でも拒否し、パイプは全文一致でのみ許可する。連結が必要な処理は対象内のスクリプトにして、その実行を1コマンドで要求する（中身が承認済みの計画と照合される）。許可されるまで推測で回避しない。',
+    review: '検証を自らの判断で省略しない。受け入れ条件の検証が未実施ならreviseとする。targetのタスクの実装を独立してレビューする。検証タスクで直した差分があれば、tasks内の対象タスクのresult（executeのsummary）に示されたもとのタスクの番号を手がかりに、その受け入れ条件も確認する。満たしていなければoutcome=reviseとし、指摘にもとのタスクの番号と崩れた条件を書く。tasks.mdのチェック状態で対象を決めない。evidenceの実装前後の記録とchangedFilesを使い、既存の変更と今回の変更を区別する。evidence.logのCLI実行ログでテストの実行出力・終了コードも確認する。実際のファイルと検証証拠を確認し、受け入れ条件を満たす場合のみok。問題があればreviseで具体的な修正を記す。',
     acceptance: '全仕様の差分の要件の実装をコードで確認する。検証は実施済みか、tasks.mdの省略の行が示す所有者の回答（確認の質問を除く）に基づく省略・変更だけを認め、回答内容と照合する。未実装または根拠のない省略があればreviseとする。合格ならreport.verificationに未検証の項目と根拠の回答の番号を列挙する。要求全体と実装・検証結果を照合する。evidenceの記録で既存の無関係なファイルが変更されていないか確認する。不足があればreviseで記す。全て満たす場合のみok。',
   }[state.stage];
   return `Workflow Executorの${state.stage}工程。${instruction}\n` +
@@ -654,12 +663,12 @@ export function prompt(state, at = Date.now()) {
     (state.openspec?.store ? `OpenSpecのコマンドには --store ${JSON.stringify(state.openspec.store)} を付ける。\n` : '') +
     (state.stage === 'prereview' ? 'tasks.mdの項目は、同じモジュールを触り同じ検証で確かめられ、間にユーザーの作業や承認がなく、まとめた差分を独立レビューで確認できる場合に統合する。承認の扱い・検証環境・必要な権限が異なる項目、ユーザーの作業を挟む項目、失敗時のやり直しが高くつく操作は分ける。decisions.granularityに統合と分割の根拠を書き、各実行タスクのタイトルに含まれるtasks.mdの項目番号をすべて示す（例「1.1・1.2 入力検証」）。\n' : '') +
     (state.stage === 'prereview' ? '承認項目のscriptsには実行するスクリプトの対象リポジトリからの相対パス、filesには操作対象ファイルの一覧を書く。effectはread（読み取りのみ）・write（ローカルの書き込み）・external（外部への変更）から選ぶ。costCheckには実行時に費用上限を確かめる手段を書く。grants.networkには必要なネットワーク許可の有無、grants.pathsには追加で許可が必要なディレクトリの絶対パスを最小限で書く。該当しない欄は空配列・空文字列・falseを使う。\n' : '') +
-    (state.kind === 'change' ? '対象changeのproposal・仕様の差分・design・全tasksを読む。executeはtargetのタスクだけをapplyし、tasks.mdのチェック状態で対象を決めず、該当tasks.mdの完了状態を更新する。reviewもtargetの実装だけを独立確認し、tasks.mdのチェック状態で対象を決めない。acceptanceはタスク群1件でも必ず全仕様の差分・全タスクと実装・検証結果を照合し、工程間の不整合と無関係な変更を確認する。\n' : '') +
+    (state.kind === 'change' ? '対象changeのproposal・仕様の差分・design・全tasksを読む。executeは完了した対象タスクのtasks.mdのチェックを更新する。reviewもtargetの実装だけを独立確認し、tasks.mdのチェック状態で対象を決めない。acceptanceはタスク群1件でも必ず全仕様の差分・全タスクと実装・検証結果を照合し、工程間の不整合と無関係な変更を確認する。\n' : '') +
     'クライアントの判断が必要なら推測で進めずoutcome=questionとしてquestionに質問を書く。\n' +
     'questionは、他の資料を読まなくてもそれだけで判断できる文にする。判断が必要な理由、選択肢とそれぞれの影響（作業量・リスク・後戻りの可否）、推奨があれば推奨と理由を含める。permissionでは必要な理由と許可しない場合の影響を書く。\n' +
     'answersの最後がinquiryなら回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' +
-    '実行環境やツールのエラーで作業できない場合はoutcome=error、question=""とし、summaryに具体的なエラーを書く。環境エラーをクライアントへの仕様質問にしない。\n' +
-    'failuresは直前の失敗です。同じ手順を繰り返さず、解消できなければoutcome=errorで原因を具体的に報告する。\n' +
+    '対象のコードを変えずに解消できる実行器・ツール・環境の問題と明確に判断できる場合だけoutcome=error、question=""とし、summaryに具体的なエラーを書く。明確に判断できない失敗はerrorにしない。環境エラーをクライアントへの仕様質問にしない。\n' +
+    'failuresは直前の失敗です。同じ手順を繰り返さず、解消できない場合も同じ基準でerrorか検証の失敗かを判断する。\n' +
     '実行器のデータやログを対象に作らない。最終応答は指定JSONスキーマのみ。summaryは結論を簡潔に記す。作業中は内部思考やコマンド全文を含めず、対象と進行状況を短く報告する。\n' +
     'report.scopeに対象ファイル・タスク、report.decisionsに判断と理由の文字列配列（判断なしは[]）、report.verificationに検証結果（未検証なら明記）、report.remainingに残件（なければ「なし」）を書く。review・acceptanceでは確認対象・受け入れ条件と結論を明記する。\n' +
     (planning
@@ -676,6 +685,6 @@ export function prompt(state, at = Date.now()) {
       ...(sameScope(state.failureStreak, attemptScope(state)) ? { failures: state.failureStreak.entries } : {}),
       ...(state.approval?.status === 'approved' ? { approval: { items: state.approval.items, conditions: state.approval.conditions } } : {}),
       ...(['execute', 'review'].includes(state.stage) ? { target: targetTask(state) } : {}),
-      grants: state.grants ?? {}, evidence: ['execute', 'review'].includes(state.stage) && state.taskStartAttempt !== undefined
+      grants: state.grants ?? {}, evidence: (state.stage === 'review' || (state.stage === 'execute' && state.kind !== 'change')) && state.taskStartAttempt !== undefined
         ? (state.evidence ?? []).filter(entry => entry.attempt > state.taskStartAttempt) : state.evidence ?? [], externalEvidence: evidenceInput(state, at) });
 }
