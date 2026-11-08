@@ -35,10 +35,11 @@ const decisions = { requirements: '要求と受け入れ条件を確認', granul
 const ok = (tasks = []) => ({ report, returnTo: 'none', outcome: 'ok', summary: '確認済み', question: '', decisions, tasks });
 const revise = { report, returnTo: 'prereview', outcome: 'revise', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
 
-const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合', gate: 'plan' }];
+const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合', gate: 'plan',
+  scripts: [], files: [], effect: 'external', costCheck: '起動前に見積額を確認', grants: { network: false, paths: [] } }];
 const approvedItems = approvalItems.map((item, index) => ({ ...item, id: `A${index + 1}` }));
 const prereviewResult = (approvals = [], retainedApprovals = []) => ({ ...ok([task]), change: 'sample-change', approvals, retainedApprovals,
-  decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要' } });
+  decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要', granularity: '同じモジュールを同じ試験で確認' } });
 
 test('replanはexecute専用で、セッションを破棄し手戻りに数えない', t => {
   const { state } = fixture(t);
@@ -286,18 +287,96 @@ test('実行前レビューはユーザーの作業をまとめ、依頼回数�
   assert.ok(!prompt(state).includes('ユーザーへの依頼回数'));
 });
 
+test('実行前レビューは統合と分割の基準を示し、根拠がなければ計画を変更しない', t => {
+  const { state } = fixture(t);
+  state.stage = 'prereview';
+  const input = prompt(state);
+  for (const text of ['同じモジュール', '同じ検証', '独立レビューで確認できる', '間にユーザーの作業や承認がなく',
+    '承認の扱い・検証環境・必要な権限が異なる項目', '失敗時のやり直しが高くつく操作',
+    'decisions.granularity', 'タイトルに含まれるtasks.mdの項目番号']) assert.ok(input.includes(text), text);
+  const schema = JSON.parse(readFileSync(join(root, 'src/prereview.schema.json'), 'utf8'));
+  assert.ok(schema.properties.decisions.required.includes('granularity'));
+  const before = structuredClone(state);
+  for (const granularity of [undefined, ' ']) {
+    const result = prereviewResult(approvalItems);
+    result.decisions.granularity = granularity;
+    assert.throws(() => advance(state, result), /統合と分割の根拠/);
+    assert.deepEqual(state, before);
+  }
+});
+
+test('統合した実行タスクを実装・レビューし、最終確認で全項目を照合する', async t => {
+  const { state, target, base } = fixture(t);
+  Object.assign(state, { kind: 'change', stage: 'prereview' });
+  const grouped = { ...task, title: '1.1・1.2 入力検証' };
+  advance(state, { ...prereviewResult(), tasks: [grouped] });
+  const change = join(target, 'openspec', 'changes', state.change);
+  mkdirSync(change, { recursive: true });
+  const tasksFile = join(change, 'tasks.md');
+  const lines = ['- [ ] 1.1 空入力', '- [ ] 1.2 空白入力'];
+  writeFileSync(tasksFile, lines.join('\n'));
+  assert.deepEqual(taskGate(state), lines);
+  for (const stage of ['execute', 'review']) {
+    assert.equal(state.stage, stage);
+    await step(state, async current => {
+      assert.deepEqual(JSON.parse(prompt(current).split('\n').at(-1)).target, { index: 0, ...grouped });
+      if (stage === 'execute') writeFileSync(tasksFile, lines.map(line => line.replace('[ ]', '[x]')).join('\n'));
+      return ok();
+    }, base);
+  }
+  assert.equal(state.stage, 'acceptance');
+  assert.equal(state.tasks[0].status, 'completed');
+  assert.deepEqual(taskGate(state), []);
+  await step(state, async () => ok(), base);
+  assert.equal(state.status, 'completed');
+});
+
 test('承認計画の必須項目を検証し、空配列を受理する', () => {
   const schema = JSON.parse(readFileSync(join(root, 'src/prereview.schema.json'), 'utf8'));
   assert.ok(schema.required.includes('approvals'));
-  assert.deepEqual(schema.properties.approvals.items.required, ['tasks', 'action', 'limits', 'stopWhen', 'gate', 'replaces', 'basisAnswer']);
+  assert.deepEqual(schema.properties.approvals.items.required, ['tasks', 'action', 'limits', 'stopWhen', 'gate',
+    'scripts', 'files', 'effect', 'costCheck', 'grants', 'replaces', 'basisAnswer']);
   assert.doesNotThrow(() => validateResult(prereviewResult(), 'prereview'));
-  for (const approvals of [undefined, null, {}, [null], ...Object.keys(approvalItems[0]).flatMap(key =>
-    ['', ' ', undefined, 1].map(value => [{ ...approvalItems[0], [key]: value }]))]) {
+  assert.doesNotThrow(() => validateResult(prereviewResult([{ ...approvalItems[0], costCheck: '' }]), 'prereview'));
+  for (const approvals of [undefined, null, {}, [null], ...['tasks', 'action', 'limits', 'stopWhen', 'gate'].flatMap(key =>
+    ['', ' ', undefined, 1].map(value => [{ ...approvalItems[0], [key]: value }])),
+    ...[{ effect: 'unknown' }, { scripts: [1] }, { files: undefined }, { costCheck: undefined }, { grants: undefined },
+      { grants: { network: 'true', paths: [] } }, { grants: { network: true, paths: [1] } },
+      { grants: { network: false, paths: [], commands: [] } }].map(fields => [{ ...approvalItems[0], ...fields }])]) {
     assert.throws(() => validateResult({ ...prereviewResult(), approvals }, 'prereview'), /承認計画/);
   }
 });
 
-test('新しい計画は承認待ち、同じ承認済み計画と空配列は実装へ進む', t => {
+test('承認待ちの要約とダッシュボードに照合用の欄を表示する', t => {
+  const { state, base } = fixture(t);
+  state.stage = 'prereview';
+  const item = { ...approvalItems[0], scripts: ['verify.ps1'], files: ['sample.txt'],
+    grants: { network: true, paths: ['/extra'] } };
+  advance(state, prereviewResult([item]));
+  assert.deepEqual(summary(state, base).approval.pending[0], { ...item, id: 'A1', replaces: '', basisAnswer: 0 });
+  save(state, base);
+  const markdown = readFileSync(join(base, 'dashboard.md'), 'utf8');
+  for (const text of ['スクリプト: verify.ps1', '対象ファイル: sample.txt', '影響: external',
+    '費用確認: 起動前に見積額を確認', 'ネットワーク許可: true', 'パス許可: /extra']) assert.ok(markdown.includes(text), text);
+});
+
+test('照合用の欄を持たない旧項目は承認と継続で内容が変わらない', async t => {
+  const { state, base } = fixture(t);
+  const item = { id: 'A1', tasks: '1.1', action: '検証', limits: '1回', stopWhen: '失敗', gate: 'plan' };
+  Object.assign(state, { kind: 'change', stage: 'execute', status: 'waiting',
+    approval: { status: 'pending', items: [item], conditions: '' } });
+  save(state, base);
+  const legacy = load(state.id, base);
+  await approve(legacy, '', base);
+  assert.equal(legacy.status, 'ready');
+  assert.deepEqual(legacy.approval.items, [item]);
+  legacy.stage = 'prereview';
+  advance(legacy, prereviewResult([], ['A1']));
+  assert.equal(legacy.status, 'ready');
+  assert.deepEqual(legacy.approval.items, [item]);
+});
+
+test('新しい計画は承認待ち、同じ承認済み計画と空配列は実装へ進む', async t => {
   const { state, base } = fixture(t);
   Object.assign(state, { kind: 'change', stage: 'prereview' });
   advance(state, prereviewResult(approvalItems));
@@ -314,7 +393,7 @@ test('新しい計画は承認待ち、同じ承認済み計画と空配列は�
   const markdown = readFileSync(join(base, 'dashboard.md'), 'utf8');
   assert.match(markdown, /承認計画.*1件/);
   for (const key of ['tasks', 'action', 'limits', 'stopWhen']) assert.ok(markdown.includes(approvalItems[0][key]));
-  approve(state, '検証終了後にVMを停止する', base);
+  await approve(state, '検証終了後にVMを停止する', base);
   const approval = structuredClone(state.approval);
   state.stage = 'prereview';
   advance(state, prereviewResult([], ['A1']));
@@ -326,7 +405,7 @@ test('新しい計画は承認待ち、同じ承認済み計画と空配列は�
   assert.equal(state.approval.status, 'pending');
   assert.deepEqual(state.approval.items, approval.items);
   assert.equal(state.approval.pending[0].id, 'A1');
-  approve(state, '', base);
+  await approve(state, '', base);
   assert.deepEqual(state.approval.items.map(item => [item.id, item.limits]), [['A1', '合計€30以内']]);
   assert.equal(state.approval.conditions, '検証終了後にVMを停止する');
   state.stage = 'prereview';
@@ -337,14 +416,14 @@ test('新しい計画は承認待ち、同じ承認済み計画と空配列は�
   assert.deepEqual(events, [['approval_removed', 'A1']]);
 });
 
-test('承認は計画・条件・日時とイベントを保存し、承認待ち以外を拒否する', t => {
+test('承認は計画・条件・日時とイベントを保存し、承認待ち以外を拒否する', async t => {
   const { state, base } = fixture(t);
-  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+  await assert.rejects(() => approve(state, '', base), /承認待ちでは/);
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
   const proposedAt = state.approval.proposedAt;
   state.session = { stage: 'prereview', sessionId: '計画' };
-  approve(state, '合計€20以内', base);
+  await approve(state, '合計€20以内', base);
   assert.equal(state.session, undefined);
   assert.equal(state.status, 'ready');
   assert.equal(state.stage, 'execute');
@@ -357,9 +436,54 @@ test('承認は計画・条件・日時とイベントを保存し、承認待�
   const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(events.at(-1).detail, state.approval);
   assert.equal(events.at(-1).type, 'approved');
-  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+  await assert.rejects(() => approve(state, '', base), /承認待ちでは/);
   state.status = 'waiting';
-  assert.throws(() => approve(state, '', base), /承認待ちでは/);
+  await assert.rejects(() => approve(state, '', base), /承認待ちでは/);
+});
+
+test('承認は申告した許可を由来とともに保存し、存在するスクリプトを固定する', async t => {
+  const { state, target, base } = fixture(t);
+  const extra = join(target, '..', 'extra');
+  mkdirSync(extra);
+  const script = join(target, 'verify.ps1');
+  writeFileSync(script, 'Write-Output ok');
+  state.stage = 'prereview';
+  state.grants = { network: false, paths: [], commands: ['git status'] };
+  advance(state, prereviewResult([
+    { ...approvalItems[0], scripts: ['verify.ps1', 'later.ps1'], grants: { network: true, paths: [extra] } },
+    { ...approvalItems[0], gate: 'each', grants: { network: true, paths: [homedir()] } },
+  ]));
+  const seen = [];
+  await approve(state, '', base, async (current, paths) => {
+    assert.equal(current.status, 'waiting');
+    seen.push(...paths);
+  });
+  assert.deepEqual(seen, [extra]);
+  const grants = { network: true, paths: [extra], commands: ['git status'], sources: [{ approvalId: 'A1', network: true, paths: [extra] }] };
+  assert.deepEqual(load(state.id, base).grants, grants);
+  assert.match(state.approval.items[0].pinned['verify.ps1'].hash, /^[a-f0-9]{64}$/);
+  assert.equal(state.approval.items[0].pinned['verify.ps1'].path, script);
+  assert.equal(state.approval.items[0].pinned['later.ps1'], null);
+  state.stage = 'prereview';
+  advance(state, prereviewResult([], ['A2']));
+  assert.deepEqual(state.grants, grants);
+});
+
+test('許可できないパス・アクセス確認の失敗・対象外のスクリプトでは承認前の状態を保つ', async t => {
+  const { state, target, base } = fixture(t);
+  for (const [item, expected, check] of [
+    [{ grants: { network: true, paths: [homedir()] } }, /許可できない/, () => assert.fail('アクセス確認は不要')],
+    [{ grants: { network: true, paths: [target] } }, /アクセス不可/, async () => { throw new Error('アクセス不可'); }],
+    [{ scripts: ['../outside.ps1'] }, /相対パス/, passed],
+  ]) {
+    state.stage = 'prereview';
+    advance(state, prereviewResult([approvalItems[0], { ...approvalItems[0], ...item }]));
+    save(state, base);
+    const before = structuredClone(state);
+    await assert.rejects(approve(state, '', base, check), expected);
+    assert.deepEqual(state, before);
+    assert.deepEqual(load(state.id, base), before);
+  }
 });
 
 test('承認計画へのanswerは回答を保存して実行前レビューへ差し戻す', t => {
@@ -379,11 +503,11 @@ test('承認計画へのanswerは回答を保存して実行前レビューへ�
   assert.equal(load(state.id, base).stage, 'prereview');
 });
 
-test('approval結果は実装だけで有効で、完了タスクと承認を保持し上限で停止する', t => {
+test('approval結果は実装だけで有効で、完了タスクと承認を保持し上限で停止する', async t => {
   const { state, base } = fixture(t);
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
-  approve(state, '', base);
+  await approve(state, '', base);
   state.tasks.unshift({ ...task, status: 'completed', result: '検証済み' });
   const tasks = structuredClone(state.tasks);
   const approval = structuredClone(state.approval);
@@ -405,12 +529,12 @@ test('approval結果は実装だけで有効で、完了タスクと承認を保
   }
 });
 
-test('retry・partial・revise・証拠登録は承認計画と条件を保持する', t => {
+test('retry・partial・revise・証拠登録は承認計画と条件を保持する', async t => {
   const { state, base, target } = fixture(t);
   state.kind = 'change';
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
-  approve(state, '検証後に停止', base);
+  await approve(state, '検証後に停止', base);
   assert.match(prompt(state), /入力のapprovalで承認済みの項目の範囲を除き/);
   assert.match(prompt(state), /範囲内の操作は質問せず/);
   assert.match(prompt(state), /停止条件.*outcome=approval/);
@@ -432,7 +556,7 @@ test('retry・partial・revise・証拠登録は承認計画と条件を保持�
   assert.deepEqual(load(state.id, base).approval, approval);
 });
 
-test('入力には承認済みの計画と条件だけを渡し、実行前レビューに全体の計画を指示する', t => {
+test('入力には承認済みの計画と条件だけを渡し、実行前レビューに全体の計画を指示する', async t => {
   const { state, base } = fixture(t);
   const input = () => JSON.parse(prompt(state).split('\n').at(-1));
   assert.equal(input().approval, undefined);
@@ -442,7 +566,7 @@ test('入力には承認済みの計画と条件だけを渡し、実行前レ�
   assert.match(prompt(state), /個別|1回ごとの承認/);
   advance(state, prereviewResult(approvalItems));
   assert.equal(input().approval, undefined);
-  approve(state, '検証後に停止', base);
+  await approve(state, '検証後に停止', base);
   for (const stage of ['execute', 'prereview']) {
     state.stage = stage;
     assert.deepEqual(input().approval, { items: approvedItems, conditions: '検証後に停止' });

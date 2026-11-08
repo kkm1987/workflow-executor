@@ -11,10 +11,23 @@
           "limits": { "type": "string" },
           "stopWhen": { "type": "string" },
           "gate": { "type": "string", "enum": ["plan", "each"] },
+          "scripts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "effect": { "type": "string", "enum": ["read", "write", "external"] },
+          "costCheck": { "type": "string" },
+          "grants": {
+            "type": "object",
+            "properties": {
+              "network": { "type": "boolean" },
+              "paths": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            },
+            "required": ["network", "paths"],
+            "additionalProperties": false
+          },
           "replaces": { "type": "string" },
           "basisAnswer": { "type": "integer", "minimum": 0 }
         },
-        "required": ["tasks", "action", "limits", "stopWhen", "gate", "replaces", "basisAnswer"],
+        "required": ["tasks", "action", "limits", "stopWhen", "gate", "scripts", "files", "effect", "costCheck", "grants", "replaces", "basisAnswer"],
         "additionalProperties": false
       }
     },
@@ -29,9 +42,10 @@
       "properties": {
         "selection": { "type": "string" },
         "applicability": { "type": "string" },
-        "updates": { "type": "string" }
+        "updates": { "type": "string" },
+        "granularity": { "type": "string" }
       },
-      "required": ["selection", "applicability", "updates"],
+      "required": ["selection", "applicability", "updates", "granularity"],
       "additionalProperties": false
     },
     "report": {

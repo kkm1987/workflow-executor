@@ -17,7 +17,7 @@ const passed = async () => ({ ok: true });
 const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
-const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要' } };
+const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要', granularity: '同じ検証' } };
 
 test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
   const { target, base } = fixture(t);
@@ -271,7 +271,8 @@ test('承認計画への回答は同じ担当のセッションへ説明と回�
       models: { prereview: { model, effort: 'medium' } } });
     await step(state, async (current, dir) => {
       writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: '計画セッション' }));
-      return { ...prereview, approvals: [{ tasks: '入力検証', action: 'VMで検証', limits: '20ユーロ', stopWhen: '上限到達', gate: 'plan' }] };
+      return { ...prereview, approvals: [{ tasks: '入力検証', action: 'VMで検証', limits: '20ユーロ', stopWhen: '上限到達', gate: 'plan',
+        scripts: [], files: [], effect: 'external', costCheck: '見積額を確認', grants: { network: false, paths: [] } }] };
     }, base, passed, noLimits, async () => {});
     assert.equal(state.status, 'waiting');
     assert.equal(state.session.stage, 'prereview');

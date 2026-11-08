@@ -10,13 +10,14 @@ import { readEvidence, currentEvidence, evidenceInput } from './external-evidenc
 import { artifactCase, artifactActivity } from './dashboard-artifact.js';
 import { publishStatus, requestPublish } from './publish.js';
 import { checkGrantAccess } from './preflight.js';
-import { normalizeCommand, resolveScript } from './escalation.js';
+import { commandGrantHash, inside, normalizeCommand, readTargetScript, resolveScript } from './escalation.js';
 
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const dataRoot = join(root, 'data');
 const now = () => new Date().toISOString();
 const stages = ['plan', 'prereview', 'execute', 'review', 'acceptance'];
 const MAX_PARTIALS = 10;
+const pathList = value => Array.isArray(value) && value.every(path => typeof path === 'string' && path.trim());
 
 export function validateResult(result, stage, state) {
   if (!stages.includes(stage)) throw new Error('工程が不正です');
@@ -48,9 +49,9 @@ export function validateResult(result, stage, state) {
     throw new Error('計画には1件以上のタスクが必要です');
   }
   if (stage === 'prereview' && result.outcome === 'ok' &&
-      (!validChangeName(result.change) || ['selection', 'applicability', 'updates'].some(key =>
+      (!validChangeName(result.change) || ['selection', 'applicability', 'updates', 'granularity'].some(key =>
         typeof result.decisions?.[key] !== 'string' || !result.decisions[key].trim()))) {
-    throw new Error('実行前レビューにはchangeと選定・実行可否・更新の根拠が必要です');
+    throw new Error('実行前レビューにはchangeと選定・実行可否・更新・統合と分割の根拠が必要です');
   }
   if (stage === 'plan' && result.outcome === 'ok' &&
       ['requirements', 'granularity', 'architecture'].some(key => typeof result.decisions?.[key] !== 'string' || !result.decisions[key].trim())) {
@@ -60,8 +61,11 @@ export function validateResult(result, stage, state) {
       (!Array.isArray(result.approvals) || result.approvals.some(item =>
         ['tasks', 'action', 'limits', 'stopWhen'].some(key => typeof item?.[key] !== 'string' || !item[key].trim()) ||
         !['plan', 'each'].includes(item.gate) || !['undefined', 'string'].includes(typeof item.replaces) ||
+        !pathList(item.scripts) || !pathList(item.files) || !['read', 'write', 'external'].includes(item.effect) ||
+        typeof item.costCheck !== 'string' || typeof item.grants?.network !== 'boolean' || !pathList(item.grants.paths) ||
+        Object.keys(item.grants).some(key => !['network', 'paths'].includes(key)) || Object.hasOwn(item, 'pinned') ||
         !(item.basisAnswer === undefined || (Number.isInteger(item.basisAnswer) && item.basisAnswer >= 0))))) {
-    throw new Error('承認計画には対象タスク・操作・上限・停止条件・個別承認の要否が必要です');
+    throw new Error('承認計画の対象タスク・操作・上限・停止条件・個別承認の要否・照合用の欄が不足しているか不正です');
   }
   if (stage === 'prereview' && result.outcome === 'ok') {
     const retained = result.retainedApprovals;
@@ -110,8 +114,9 @@ function applyApprovals(state, result, reviews, log) {
     const id = replaces || `A${nextId++}`;
     const before = known.find(entry => entry.id === replaces);
     if (reviews[index]) {
-      items.push({ ...item, id });
-      log('approval_replaced', { before, after: { ...item, id }, basisAnswer, answer: state.answers[basisAnswer - 1]?.answer ?? null, review: reviews[index] });
+      const after = { ...item, id, ...(before?.pinned ? { pinned: before.pinned } : {}) };
+      items.push(after);
+      log('approval_replaced', { before, after, basisAnswer, answer: state.answers[basisAnswer - 1]?.answer ?? null, review: reviews[index] });
     } else {
       pending.push({ ...item, id, replaces, basisAnswer });
       // 所有者が判断するまで変更前の項目を保持する。
@@ -404,7 +409,13 @@ function dashboardLocked(base, { config, launch, at } = {}) {
       for (const entry of view.externalEvidence) lines.push('', `証拠 ${cell(entry.name)} (#${entry.id}): ${cell(entry.subject)} / ${cell(entry.host)} / 測定 ${cell(entry.observedAt)} / 期限 ${cell(entry.expiresAt)} / ${entry.valid ? '有効' : '期限切れ・再測定・再登録が必要'} / 出典 ${cell(entry.source)} / [保存内容](${state.id}/state.json#externalEvidence/${entry.id})`);
       if (state.status === 'limited') lines.push('', `利用枠: ${cell(JSON.stringify(state.rateLimits))}${rateLimitsFailures(state.selection) ? ` / ${cell(rateLimitsFailures(state.selection))}` : ''}`, '', cell(view.nextAction));
       if (state.status === 'waiting') lines.push('', `停止理由: ${cell(state.lastResult)}`, '', `質問: ${cell(state.question)}`);
-      if (view.approval) for (const item of view.approval.pending) lines.push('', `承認対象: ${cell(item.tasks)} / 操作: ${cell(item.action)} / 上限: ${cell(item.limits)} / 停止条件: ${cell(item.stopWhen)}`);
+      if (view.approval) for (const item of view.approval.pending) {
+        const fields = [['承認対象', item.tasks], ['操作', item.action], ['上限', item.limits], ['停止条件', item.stopWhen],
+          ['スクリプト', item.scripts?.join(', ')], ['対象ファイル', item.files?.join(', ')], ['影響', item.effect], ['費用確認', item.costCheck],
+          ['ネットワーク許可', item.grants?.network], ['パス許可', item.grants?.paths.join(', ')]];
+        lines.push('', fields.filter(([, value]) => value !== undefined)
+          .map(([label, value]) => `${label}: ${cell(value === '' ? 'なし' : value)}`).join(' / '));
+      }
       if (state.status === 'failed') lines.push('', `停止理由: ${cell(state.error)}`);
       if (state.status === 'blocked') lines.push('', `差し戻し理由: ${cell(state.lastResult)}`);
       if (state.status === 'completed') lines.push('', `[成果](${url(state.target)}/) · [検証結果](${state.id}/attempt-${String(state.attempts).padStart(4, '0')}/result.json)`, '', `結果: ${cell(state.lastResult)}`);
@@ -474,12 +485,42 @@ export function answer(state, text, base = dataRoot, inquiry = false) {
   save(state, base);
 }
 
-export function approve(state, conditions = '', base = dataRoot) {
+export async function approve(state, conditions = '', base = dataRoot, check = checkGrantAccess) {
   if (state.status !== 'waiting' || state.approval?.status !== 'pending') throw new Error('承認待ちではありません');
   if (typeof conditions !== 'string') throw new Error('承認条件は文字列で指定してください');
-  const { items, pending, conditions: previous } = state.approval;
-  const accepted = pending.map(({ replaces, basisAnswer, ...item }) => item);
-  state.approval = { ...state.approval, status: 'approved', pending: [],
+  const approval = state.approval;
+  const { items, pending, conditions: previous } = approval;
+  const sources = [];
+  for (const item of pending) {
+    if (item.gate !== 'plan' || !item.grants) continue;
+    const { network, paths } = item.grants;
+    if (network || paths.length) sources.push({ approvalId: item.id, network, paths: validateGrantPaths(paths) });
+  }
+  const paths = [...new Set(sources.flatMap(source => source.paths))];
+  if (paths.length) await check(state, paths);
+
+  const accepted = pending.map(({ replaces, basisAnswer, ...item }) => {
+    if (!item.scripts?.length) return item;
+    const pinned = Object.fromEntries(item.scripts.map(script => {
+      if (isAbsolute(script) || !inside(state.target, resolve(state.target, script))) {
+        throw new Error(`対象からの相対パスを指定してください: ${script}`);
+      }
+      try {
+        const { path, hash } = readTargetScript(script, state.target);
+        return [script, { path, hash }];
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        return [script, null];
+      }
+    }));
+    return { ...item, pinned };
+  });
+  if (state.approval !== approval || state.status !== 'waiting') throw new Error('確認中に承認待ちの状態が変更されました');
+  if (sources.length) state.grants = {
+    ...state.grants, network: Boolean(state.grants?.network || sources.some(source => source.network)),
+    paths: [...new Set([...(state.grants?.paths ?? []), ...paths])], sources: [...(state.grants?.sources ?? []), ...sources],
+  };
+  state.approval = { ...approval, status: 'approved', pending: [],
     items: [...items.filter(item => !accepted.some(entry => entry.id === item.id)), ...accepted],
     conditions: [previous, conditions].filter(Boolean).join('\n'), approvedAt: now() };
   state.question = '';
@@ -503,6 +544,18 @@ export function registerEvidence(state, path, base = dataRoot) {
 
 const secretDirs = ['.ssh', '.aws', '.gnupg', '.azure', '.kube', '.docker'];
 
+function validateGrantPaths(paths) {
+  if (!paths.length) return [];
+  const home = realpathSync(homedir());
+  return paths.map(path => {
+    const real = realpathSync(resolve(path));
+    if (!statSync(real).isDirectory()) throw new Error(`ディレクトリではありません: ${path}`);
+    if (real === parse(real).root || inside(real, home) ||
+        (inside(home, real) && secretDirs.includes(relative(home, real).split(sep)[0]))) throw new Error(`許可できないパスです: ${path}`);
+    return real;
+  });
+}
+
 // 権限要求の許可。保存した許可は以後の全工程の実行で有効になり、回答として同じセッションへ伝える。
 export async function grant(state, { network = false, paths = [], commands = [] }, base = dataRoot, check = checkGrantAccess) {
   if (state.status !== 'waiting' || !state.permission) throw new Error('権限要求の回答待ちではありません');
@@ -511,16 +564,7 @@ export async function grant(state, { network = false, paths = [], commands = [] 
     throw new Error('空または要求されていないコマンドは許可できません');
   }
   if (!network && !paths.length && !commands.length) throw new Error('許可するネットワーク・パス・コマンドを指定してください');
-  const home = realpathSync(homedir());
-  const resolved = paths.map(path => {
-    const real = realpathSync(resolve(path));
-    // 別ドライブでは相対パスが絶対パスになるため、包含判定から除く。
-    const inside = (parent, child) => { const rel = relative(parent, child); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
-    if (!statSync(real).isDirectory()) throw new Error(`ディレクトリではありません: ${path}`);
-    if (real === parse(real).root || inside(real, home) ||
-        (inside(home, real) && secretDirs.includes(relative(home, real).split(sep)[0]))) throw new Error(`許可できないパスです: ${path}`);
-    return real;
-  });
+  const resolved = validateGrantPaths(paths);
   if (resolved.length) {
     try { await check(state, resolved); } catch (error) {
       event(state, 'grant-rejected', { paths: resolved, reason: error.message }, base);
@@ -536,7 +580,7 @@ export async function grant(state, { network = false, paths = [], commands = [] 
     for (const command of commands) {
       const key = normalizeCommand(command);
       const cwd = recorded.findLast(entry => normalizeCommand(entry.commandActions?.[0]?.command ?? '') === key)?.cwd;
-      hashes[key] = resolveScript(command, cwd ?? state.target, state.target)?.hash ?? null;
+      hashes[key] = commandGrantHash(resolveScript(command, cwd ?? state.target, state.target));
     }
     state.grants.commandHashes = hashes;
   }
@@ -608,6 +652,8 @@ export function prompt(state, at = Date.now()) {
     '対象のAGENTS.mdを守る。既存の無関係な変更を保持する。入力のapprovalで承認済みの項目の範囲を除き、コミット、push、公開、外部への送信はしない。plan・review・acceptance工程ではファイルを編集しない。' +
     `prereviewは選定した${join(state.openspec?.root ?? state.target, 'openspec', 'changes', state.change ?? '<change>')}内だけ編集可能。\n` +
     (state.openspec?.store ? `OpenSpecのコマンドには --store ${JSON.stringify(state.openspec.store)} を付ける。\n` : '') +
+    (state.stage === 'prereview' ? 'tasks.mdの項目は、同じモジュールを触り同じ検証で確かめられ、間にユーザーの作業や承認がなく、まとめた差分を独立レビューで確認できる場合に統合する。承認の扱い・検証環境・必要な権限が異なる項目、ユーザーの作業を挟む項目、失敗時のやり直しが高くつく操作は分ける。decisions.granularityに統合と分割の根拠を書き、各実行タスクのタイトルに含まれるtasks.mdの項目番号をすべて示す（例「1.1・1.2 入力検証」）。\n' : '') +
+    (state.stage === 'prereview' ? '承認項目のscriptsには実行するスクリプトの対象リポジトリからの相対パス、filesには操作対象ファイルの一覧を書く。effectはread（読み取りのみ）・write（ローカルの書き込み）・external（外部への変更）から選ぶ。costCheckには実行時に費用上限を確かめる手段を書く。grants.networkには必要なネットワーク許可の有無、grants.pathsには追加で許可が必要なディレクトリの絶対パスを最小限で書く。該当しない欄は空配列・空文字列・falseを使う。\n' : '') +
     (state.kind === 'change' ? '対象changeのproposal・仕様の差分・design・全tasksを読む。executeはtargetのタスクだけをapplyし、tasks.mdのチェック状態で対象を決めず、該当tasks.mdの完了状態を更新する。reviewもtargetの実装だけを独立確認し、tasks.mdのチェック状態で対象を決めない。acceptanceはタスク群1件でも必ず全仕様の差分・全タスクと実装・検証結果を照合し、工程間の不整合と無関係な変更を確認する。\n' : '') +
     'クライアントの判断が必要なら推測で進めずoutcome=questionとしてquestionに質問を書く。\n' +
     'questionは、他の資料を読まなくてもそれだけで判断できる文にする。判断が必要な理由、選択肢とそれぞれの影響（作業量・リスク・後戻りの可否）、推奨があれば推奨と理由を含める。permissionでは必要な理由と許可しない場合の影響を書く。\n' +

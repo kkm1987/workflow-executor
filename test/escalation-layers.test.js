@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { root, create, advance, answer, approve, grant, load, prompt, summary, save, normalizeApproval, validateResult } from '../src/workflow.js';
 import { runAgent, step, claudeArgs } from '../src/executor.js';
 import { readConfig } from '../src/config.js';
@@ -15,7 +16,8 @@ import { fakeCodex } from './fixtures/codex.js';
 
 const method = 'item/commandExecution/requestApproval';
 const params = (command, cwd) => ({ command, commandActions: [{ type: 'unknown', command }], cwd, reason: '必要' });
-const item = { id: 'A1', tasks: '1.1', action: 'storeへ公開', limits: '1回', stopWhen: '失敗', gate: 'plan' };
+const item = { id: 'A1', tasks: '1.1', action: 'storeへ公開', limits: '1回', stopWhen: '失敗', gate: 'plan',
+  scripts: [], files: [], effect: 'external', costCheck: '', grants: { network: false, paths: [] } };
 const plan = { status: 'approved', items: [item, { ...item, id: 'A2', gate: 'each' }], pending: [], conditions: '条件', nextId: 3 };
 const ok = { returnTo: 'none', outcome: 'ok', summary: '完了', question: '', tasks: [], report: { scope: '対象', decisions: [], verification: '確認', remaining: 'なし' } };
 const allow = { decision: 'allow', approvalId: 'A1', riskLevel: 'low', rationale: '計画の範囲内' };
@@ -79,6 +81,15 @@ test('全文一致の許可はスクリプトの内容に束縛し、旧許可�
   assert.equal(commandDecision({ ...state, grants: { commands: ['git push origin main'] } }, 'git push origin main', target).decision, 'accept');
 });
 
+test('UTF-8の本文から記録した既存のコマンド許可を引き続き使える', t => {
+  const { target, state } = fixture(t);
+  const script = Buffer.from([0xff, 0xfe, 0x78, 0x00]);
+  writeFileSync(join(target, 'legacy.ps1'), script);
+  const command = '& ./legacy.ps1';
+  state.grants = { commands: [command], commandHashes: { [command]: createHash('sha256').update(script.toString('utf8')).digest('hex') } };
+  assert.equal(commandDecision(state, command, target).decision, 'accept');
+});
+
 test('権限要求の表示は実行するスクリプトのハッシュと先頭部分を示す', t => {
   const { base, state } = fixture(t);
   Object.assign(state, { status: 'waiting', permission: { network: false, paths: [], commands: ['& ./upload.ps1', 'other'] } });
@@ -108,6 +119,32 @@ test('審査の許可は実行器が検証し、失敗は所有者へ戻す', as
   assert.equal((await reviewCommand(state, escalationDecision(state, method, params('& ./upload.ps1', target)), null)).decision, 'decline');
   assert.equal(commandDecision({ ...state, approval: { ...plan, items: [plan.items[1]] } }, 'other').reviewRequest, undefined);
   assert.equal(commandDecision({ ...state, approval: undefined }, 'other').reviewRequest, undefined);
+});
+
+test('計画審査は固定したスクリプトのパスと内容を照合し、未固定なら従来どおり判定する', async t => {
+  const { target, base, state } = fixture(t);
+  const { id, ...entry } = item;
+  state.stage = 'prereview';
+  advance(state, pre([
+    { ...entry, scripts: ['upload.ps1'], files: ['snapshot.json'], costCheck: '見積額を確認' },
+    { ...entry, scripts: ['later.ps1'] },
+  ]));
+  await approve(state, '', base);
+  const review = (name, run = async () => allow) => reviewCommand(state, commandDecision(state, `& ./${name}`, target), run);
+  const original = readFileSync(join(target, 'upload.ps1'));
+  assert.equal((await review('upload.ps1', async input => {
+    assert.match(input, /費用上限を確認できない場合はdecision=ask/);
+    const data = JSON.parse(input.split('\n').at(-1));
+    assert.deepEqual(data.approval.items, state.approval.items);
+    assert.equal(data.script.hash, data.approval.items[0].pinned['upload.ps1'].hash);
+    return allow;
+  })).decision, 'accept');
+  writeFileSync(join(target, 'other.ps1'), original);
+  assert.match((await review('other.ps1')).basis, /固定したパスとハッシュ/);
+  writeFileSync(join(target, 'upload.ps1'), '変更後');
+  assert.match((await review('upload.ps1')).basis, /固定したパスとハッシュ/);
+  writeFileSync(join(target, 'later.ps1'), '承認後に作成');
+  assert.equal((await review('later.ps1', async () => ({ ...allow, approvalId: 'A2' }))).decision, 'accept');
 });
 
 test('実行中の審査は別スレッドで行い、許可を再利用しない', async t => {
@@ -188,13 +225,16 @@ test('計画審査の設定は既定・無効・Claude拒否を検証する', t 
 });
 
 const pre = (approvals = [], retainedApprovals = []) => ({ ...ok, tasks: [{ title: 'T', acceptance: 'A' }], approvals, retainedApprovals, change: 'sample-change',
-  decisions: { selection: 's', applicability: 'a', updates: 'u' } });
+  decisions: { selection: 's', applicability: 'a', updates: 'u', granularity: '同じ検証' } });
 
 test('回答を根拠とする変更は審査で置き換え、範囲外は承認待ち、差し戻しで承認済みを保持する', async t => {
-  const { base, state } = fixture(t);
+  const { base, state, target } = fixture(t);
   Object.assign(state, { kind: 'change', change: 'sample-change', stage: 'prereview', approval: structuredClone(plan), answers: [{ answer: '上限は3回' }] });
+  const { path, hash } = resolveScript('& ./upload.ps1', target, target);
+  const pinned = { 'upload.ps1': { path, hash } };
+  Object.assign(state.approval.items[0], { scripts: ['upload.ps1'], pinned });
   save(state, base);
-  const changed = { ...item, limits: '3回', replaces: 'A1', basisAnswer: 1 };
+  const changed = { ...item, scripts: ['upload.ps1'], limits: '3回', replaces: 'A1', basisAnswer: 1 };
   delete changed.id;
   const noLimits = async () => ({ limits: null, failure: null });
   const passed = async () => ({ ok: true });
@@ -204,6 +244,7 @@ test('回答を根拠とする変更は審査で置き換え、範囲外は承�
   assert.equal(state.status, 'ready');
   assert.match(seen[0], /上限は3回/);
   assert.deepEqual(state.approval.items.map(entry => [entry.id, entry.limits]), [['A2', '1回'], ['A1', '3回']]);
+  assert.deepEqual(state.approval.items[1].pinned, pinned);
   const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const replaced = events.find(entry => entry.type === 'approval_replaced').detail;
   assert.deepEqual([replaced.before.limits, replaced.after.limits, replaced.answer, replaced.review.rationale], ['1回', '3回', '上限は3回', '計画の範囲内']);

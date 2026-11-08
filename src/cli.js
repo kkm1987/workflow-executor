@@ -80,6 +80,9 @@ try {
         const current = load(args[0]);
         const paths = [current.target, ...(current.grants?.paths ?? [])];
         if (current.kind === 'change') paths.push(current.openspec?.root ?? current.target);
+        if (command === 'approve') for (const item of current.approval?.pending ?? []) {
+          if (item.gate === 'plan') paths.push(...(item.grants?.paths ?? []));
+        }
         if (command === 'grant') for (let i = 1; i < args.length; i++) {
           if (['--path', '--command'].includes(args[i]) && args[i + 1] !== undefined) {
             const option = args[i++];
@@ -94,7 +97,7 @@ try {
         console.log(JSON.stringify(brief(summary(current))));
       });
       else if (command === 'answer') answer(state, readFileSync(resolve(args[1]), 'utf8'), dataRoot, args[2] === '--inquiry');
-      else if (command === 'approve') approve(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
+      else if (command === 'approve') await approve(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'close') close(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'grant') {
         const options = { network: false, paths: [], commands: [] };

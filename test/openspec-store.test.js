@@ -145,7 +145,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   const runner = async (current, attempt) => {
     stages.push(current.stage);
     const result = { returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', report,
-      decisions: current.stage === 'prereview' ? { selection: '指定', applicability: '実行可能', updates: 'タスク確認' } : { requirements: '', granularity: '', architecture: '' },
+      decisions: current.stage === 'prereview' ? { selection: '指定', applicability: '実行可能', updates: 'タスク確認', granularity: '同じ検証' } : { requirements: '', granularity: '', architecture: '' },
       tasks: current.stage === 'prereview' ? [{ title: '挨拶を実装', acceptance: 'Helloを保存' }] : [],
       ...(current.stage === 'prereview' ? { change: 'sample', approvals: [], retainedApprovals: [] } : {}) };
     const edits = current.stage === 'prereview'
