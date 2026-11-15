@@ -144,7 +144,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   const report = { scope: '挨拶', decisions: [], verification: '固定応答で実行器を検証', remaining: 'なし' };
   const runner = async (current, attempt) => {
     stages.push(current.stage);
-    const result = { returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', report,
+    const result = { returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', report,
       decisions: current.stage === 'prereview' ? { selection: '指定', applicability: '実行可能', updates: 'タスク確認', granularity: '同じ検証' } : { requirements: '', granularity: '', architecture: '' },
       tasks: current.stage === 'prereview' ? [{ title: '挨拶を実装', acceptance: 'Helloを保存' }] : [],
       ...(current.stage === 'prereview' ? { change: 'sample', approvals: [], retainedApprovals: [] } : {}) };

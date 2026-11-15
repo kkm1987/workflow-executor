@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { root, create, load, setModel, setFallback, save, answer, retry, summary } from '../src/workflow.js';
+import { root, create, load, setModel, setFallback, save, answer, retry, summary, brief } from '../src/workflow.js';
 import { assignment, attemptAssignment, fallbackAssignment, readConfig, validateAssignments } from '../src/config.js';
 import { step, run, runAgent, inputFor, resumeSession, codexArgs, claudeArgs } from '../src/executor.js';
 import { preflight, checkGrantAccess } from '../src/preflight.js';
@@ -16,7 +16,7 @@ const enough = { primary: { usedPercent: 80 }, secondary: { usedPercent: 90 } };
 const low = { primary: { usedPercent: 99 } };
 const passed = async () => ({ ok: true });
 const report = { scope: '代替選択', decisions: [], verification: '試験済み', remaining: 'なし' };
-const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [{ title: '実装', acceptance: '動作する' }] };
+const ok = { report, returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [{ title: '実装', acceptance: '動作する' }] };
 
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'fallback-'));
@@ -200,6 +200,7 @@ test('代替確認の失敗はfailed・0試行、未選択CLIは未確認、同�
     async current => ({ ok: !current.attemptAssignment, error: '代替が未認証' }),
     async (_, value) => ({ limits: value.cli === 'codex' ? low : enough, failure: null }));
   assert.equal(failed.status, 'failed'); assert.equal(failed.attempts, 0);
+  assert.deepEqual(failed.failureStreak.entries.map(entry => entry.kind), ['preflight']);
   const normal = make();
   let checks = 0;
   await step(normal, async () => ok, base, async current => { checks++; assert.equal(current.attemptAssignment, undefined); return { ok: true }; }, async () => ({ limits: enough, failure: null }));
@@ -403,38 +404,52 @@ test('対象またはOpenSpecの変更が進捗なしをリセットし、通算
   }
 });
 
-test('失敗で代替へ切り替え、partialでも継続し、次のタスクは通常側に戻る', async t => {
+test('一時的な失敗後は通常枠で担当を選び直し、変更と承認の確認を新規入力に含める', async t => {
   const { target, base } = fixture(t);
   const state = create(target, '要求', base, undefined, { fallbacks: { execute: claude } });
   Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }, { title: '次', acceptance: '確認', status: 'pending' }] });
   const observed = [];
   await run(state, async current => {
     observed.push([current.stage, attemptAssignment(current).cli]);
-    if (observed.length === 1) throw new Error('環境エラー');
+    if (observed.length === 1) {
+      current.evidence = [{ attempt: current.attempts, changedFiles: ['src/feature.js'], openspec: { changedFiles: ['openspec/changes/sample/tasks.md'] } }];
+      return { ...ok, outcome: 'error', cause: 'transient', summary: '一時ディレクトリの削除が競合' };
+    }
     if (observed.length === 2) {
-      const input = JSON.parse(inputFor(current).split('\n').at(-1));
-      assert.equal(input.failures[0].error, '環境エラー');
+      const prompt = inputFor(current);
+      const { failures } = JSON.parse(prompt.split('\n').at(-1));
+      assert.equal(failures[0].error, '一時ディレクトリの削除が競合');
+      assert.equal(failures[0].kind, 'reported-transient');
+      assert.deepEqual(failures[0].changedFiles, ['src/feature.js', 'openspec/changes/sample/tasks.md']);
+      assert.match(prompt, /承認されていない前提でchangedFilesと実際の差分を照合/);
+      assert.match(prompt, /回数を制限された承認を使い切っていれば、その操作を再実行せず停止/);
       assert.equal(resumeSession(current), null);
-      assert.equal(current.selection.reason, '通常側の失敗により代替を選択');
+      assert.equal(current.selection.reason, '通常側の利用枠が十分');
       return { ...ok, outcome: 'partial' };
     }
     return ok;
-  }, base, undefined, passed, async () => ({ limits: enough, failure: null }));
-  assert.deepEqual(observed, [['execute', 'codex'], ['execute', 'claude'], ['execute', 'claude'], ['review', 'codex'], ['execute', 'codex'], ['review', 'codex'], ['acceptance', 'codex']]);
+  }, base, undefined, passed, async (_, value) => {
+    assert.equal(value.cli, 'codex');
+    return { limits: enough, failure: null };
+  });
+  assert.deepEqual(observed, ['execute', 'execute', 'execute', 'review', 'execute', 'review', 'acceptance'].map(stage => [stage, 'codex']));
   assert.equal(state.failureStreak, undefined);
   assert.equal(state.envFallback, undefined);
 });
 
-test('代替も失敗すると2回で止まり、retryの入力と状態表示に失敗履歴が残る', async t => {
+test('再試行も失敗すると2回で止まり、retryの入力と状態表示に最初からの履歴が残る', async t => {
   const { target, base } = fixture(t);
   const state = create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
   let calls = 0;
-  const fail = async () => { calls++; throw new Error('E'.repeat(600)); };
+  const fail = async () => { calls++; throw new Error(`${calls}${'E'.repeat(600)}`); };
   await step(state, fail, base, passed, async () => ({ limits: enough, failure: null }));
   assert.equal(calls, 2);
   assert.equal(state.status, 'failed');
   assert.equal(state.failureStreak.count, 2);
-  assert.match(summary(state, base).nextAction, /2回連続.*人/);
+  const detailed = summary(state, base, true);
+  assert.match(detailed.nextAction, /2回連続.*人/);
+  assert.deepEqual(detailed.failureStreak.entries.map(entry => [entry.kind, entry.error[0]]), [['process', '1'], ['process', '2']]);
+  assert.deepEqual(brief(summary(state, base)).failureStreak, detailed.failureStreak);
   retry(state, base);
   assert.equal(state.failureStreak.count, 2);
   assert.equal(JSON.parse(inputFor(state).split('\n').at(-1)).failures[0].error.length, 500);
@@ -442,31 +457,58 @@ test('代替も失敗すると2回で止まり、retryの入力と状態表示�
   retry(state, base);
   await step(state, fail, base, passed, async () => ({ limits: enough, failure: null }));
   assert.equal(state.failureStreak.count, 4);
-  assert.deepEqual(state.failureStreak.entries.map(entry => entry.attempt), [2, 3, 4]);
+  assert.deepEqual(state.failureStreak.entries.map(entry => entry.attempt), [1, 2, 3, 4]);
   retry(state, base);
   await step(state, async () => ok, base, passed, async () => ({ limits: enough, failure: null }));
   assert.equal(state.failureStreak, undefined);
 });
 
-test('代替なしは自動再実行せず、失敗後の代替不足・取得不能・確認失敗は停止する', async t => {
+test('所有者の対応が必要な報告では再試行も代替照会もせずに停止する', async t => {
   const { target, base } = fixture(t);
-  for (const alternative of [undefined, low, null, 'preflight']) {
-    const state = create(target, '要求', base, undefined, { fallbacks: alternative === undefined ? {} : { plan: claude } });
-    let calls = 0;
-    await step(state, async () => { calls++; return { ...ok, outcome: 'error', summary: '環境エラー' }; }, base,
-      async current => ({ ok: alternative !== 'preflight' || current.attemptAssignment?.cli !== 'claude', error: '代替確認失敗' }),
-      async (_, value) => ({ limits: value.cli === 'codex' || alternative === 'preflight' ? enough : alternative, failure: null }));
-    assert.equal(calls, 1);
-    assert.equal(state.status, alternative === undefined || alternative === 'preflight' ? 'failed' : 'limited');
+  const state = create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
+  await step(state, async () => ({ ...ok, outcome: 'error', cause: 'environment', summary: 'OSの権限で拒否' }), base, passed,
+    async (_, value) => { assert.equal(value.cli, 'codex'); return { limits: enough, failure: null }; });
+  assert.equal(state.attempts, 1);
+  assert.equal(state.status, 'failed');
+  assert.deepEqual(summary(state, base).failureStreak.entries.map(entry => [entry.kind, entry.error]), [['reported-environment', 'OSの権限で拒否']]);
+});
+
+test('旧envFallbackを無視して通常側を選び、kindのない失敗を表示する', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
+  state.envFallback = { stage: 'plan', task: null };
+  state.failureStreak = { stage: 'plan', task: null, count: 1, entries: [{ attempt: 1, cli: 'codex', error: '旧記録のエラー' }] };
+  save(state, base);
+  const loaded = load(state.id, base);
+  for (const view of [brief(summary(loaded, base)), summary(loaded, base, true)]) {
+    assert.deepEqual(view.failureStreak.entries.map(entry => [entry.kind, entry.error]), [['種類不明', '旧記録のエラー']]);
   }
+  await step(loaded, async current => { assert.equal(attemptAssignment(current).cli, 'codex'); return ok; }, base, passed,
+    async (_, value) => { assert.equal(value.cli, 'codex'); return { limits: enough, failure: null }; });
+  assert.equal(loaded.stage, 'execute');
+  assert.equal(loaded.failureStreak, undefined);
+});
+
+test('再試行の利用枠不足で最初の失敗と停止理由が表示に残る', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base);
+  let checks = 0;
+  await step(state, async () => { throw new Error('最初のCLI失敗'); }, base, passed,
+    async () => ({ limits: ++checks === 1 ? enough : low, failure: null }));
+  const saved = load(state.id, base);
+  const view = brief(summary(saved, base));
+  assert.equal(saved.attempts, 1);
+  assert.equal(view.status, 'limited');
+  assert.match(view.error, /通常側の利用枠不足/);
+  assert.deepEqual(view.failureStreak.entries.map(entry => [entry.kind, entry.error]), [['process', '最初のCLI失敗']]);
 });
 
 test('代替タイムアウトは記録・停止理由・利用枠表示へ残り、旧状態では補わない', async t => {
   const { target, base } = fixture(t);
   const state = create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
   const failure = { reason: 'timeout', elapsedMs: 30010, detail: '' };
-  await step(state, () => { throw new Error('環境エラー'); }, base, passed,
-    async (_, value) => value.cli === 'codex' ? { limits: enough, failure: null } : { limits: null, failure });
+  await step(state, () => assert.fail('モデルを起動しない'), base, passed,
+    async (_, value) => value.cli === 'codex' ? { limits: low, failure: null } : { limits: null, failure });
   assert.equal(state.status, 'limited');
   assert.deepEqual(load(state.id, base).selection.fallback.rateLimitsFailure, failure);
   assert.equal(state.selection.normal.rateLimitsFailure, undefined);

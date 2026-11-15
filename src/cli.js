@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { reserve } from './locking.js';
 import { resolve } from 'node:path';
-import { create, load, close, answer, approve, grant, dataRoot, list, summary, brief, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
+import { create, load, close, answer, approve, approvalSelection, grant, dataRoot, list, summary, brief, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
 import { step, run } from './executor.js';
 import { startChange, archive } from './changes.js';
 
@@ -19,7 +19,7 @@ const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   step <ID>                     次の1工程を実行
   run <ID>                      回答待ち・失敗・完了まで工程を進める
   answer <ID> <回答ファイル> [--inquiry]  回答を保存（--inquiryは確認の質問）
-  approve <ID> [条件ファイル]    承認計画を承認し、条件を保存
+  approve <ID> [--items <ID,...>] [条件ファイル]    承認待ちの項目を承認し、項目ごとの条件を保存
   grant <ID> [--network] [--path <ディレクトリ>]... [--command <コマンド>]...  権限要求を許可して再開
   retry <ID>                 失敗・中断後、変更確認を経て再開可能にする
   evidence <ID> <JSONファイル>  停止中の案件へ外部証拠を登録
@@ -39,7 +39,19 @@ try {
       (command === 'status' && !(args.length <= 1 || (args.length === 2 && args[0] !== '--all' && !args[0].startsWith('--') && args[1] === '--detail'))) ||
       (command === 'model' && ![3, 4].includes(args.length)) ||
       (command === 'fallback' && (![3, 4].includes(args.length) || (args[2] === '--disable' && args.length !== 3))) ||
-      (['approve', 'close'].includes(command) && ![1, 2].includes(args.length))) throw new Error(help);
+      (command === 'close' && ![1, 2].includes(args.length))) throw new Error(help);
+    let approvalIds, conditionFile;
+    if (command === 'approve') {
+      const [, option, ids, file] = args;
+      if (option === '--items') {
+        if (!ids || ids.startsWith('--') || args.length > 4 || file?.startsWith('--')) throw new Error(help);
+        approvalIds = ids.split(',');
+        conditionFile = file;
+      } else {
+        if (!args.length || args.length > 2 || option?.startsWith('--')) throw new Error(help);
+        conditionFile = option;
+      }
+    }
     if (command === 'status') {
       try { dashboard(); }
       catch (error) { console.error(`ダッシュボードを更新できませんでした: ${error.message}`); }
@@ -80,8 +92,10 @@ try {
         const current = load(args[0]);
         const paths = [current.target, ...(current.grants?.paths ?? [])];
         if (current.kind === 'change') paths.push(current.openspec?.root ?? current.target);
-        if (command === 'approve') for (const item of current.approval?.pending ?? []) {
-          if (item.gate === 'plan') paths.push(...(item.grants?.paths ?? []));
+        if (command === 'approve' && current.status === 'waiting' && current.approval?.status === 'pending') {
+          for (const item of approvalSelection(current, approvalIds)) {
+            if (item.gate === 'plan') paths.push(...(item.grants?.paths ?? []));
+          }
         }
         if (command === 'grant') for (let i = 1; i < args.length; i++) {
           if (['--path', '--command'].includes(args[i]) && args[i + 1] !== undefined) {
@@ -97,7 +111,7 @@ try {
         console.log(JSON.stringify(brief(summary(current))));
       });
       else if (command === 'answer') answer(state, readFileSync(resolve(args[1]), 'utf8'), dataRoot, args[2] === '--inquiry');
-      else if (command === 'approve') await approve(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
+      else if (command === 'approve') await approve(state, conditionFile ? readFileSync(resolve(conditionFile), 'utf8') : '', dataRoot, undefined, approvalIds);
       else if (command === 'close') close(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'grant') {
         const options = { network: false, paths: [], commands: [] };

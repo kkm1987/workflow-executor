@@ -26,6 +26,9 @@ export function execpolicyRules(target, codexHome = process.env.CODEX_HOME ?? jo
   return records;
 }
 
+// Windows elevatedサンドボックスの初回準備は対象が大きいと15秒を超えるため、codex sandboxの起動だけ長くする。
+const SANDBOX_TIMEOUT = 120_000;
+
 export async function checkGrantAccess(state, paths, check = checkCommand) {
   if (!paths.length) return;
   const codex = (state.attemptAssignment ?? assignment({ ...state, stage: 'execute' })).cli === 'codex';
@@ -34,7 +37,7 @@ export async function checkGrantAccess(state, paths, check = checkCommand) {
     try {
       if (codex) {
         await check(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, roots),
-          '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target);
+          '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target, SANDBOX_TIMEOUT);
       } else readdirSync(path);
     } catch {
       throw new Error(`アクセス確認に失敗しました。OSのアクセス権・サンドボックス設定・管理ポリシーを確認してください: ${path}`);
@@ -106,7 +109,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       ...[':read-only', ':workspace'].map(profile => [
         `サンドボックス ${profile}`, codex, ['sandbox', '-P', profile, '-C', state.target,
           '--include-managed-config', ...windowsSandboxArgs(),
-          '--', process.execPath, '-e', 'process.exit(0)'],
+          '--', process.execPath, '-e', 'process.exit(0)'], SANDBOX_TIMEOUT,
       ]),
     ];
     if (state.attemptAssignment?.cli === 'claude' || stagesFor(state.kind).some(stage => assignment({ ...state, stage }).cli === 'claude')) {
@@ -118,7 +121,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
     }
     for (const entry of commands) {
       name = entry[0];
-      const output = await check(entry[1], entry[2], state.target);
+      const output = await check(entry[1], entry[2], state.target, entry[3]);
       if (name === 'Claude認証' && typeof output === 'string' && !JSON.parse(output).loggedIn) throw new Error('Claudeが未認証');
       report.checks.push({ name, ok: true, ...(entry[2][0] === '--version' ? { path: entry[1], version: typeof output === 'string' ? output.trim() : null } : {}) });
     }
@@ -133,7 +136,7 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
         const bash = resolveGitBash();
         try {
           await check(codex, ['sandbox', ...sandboxProfileArgs(state.target, writablePaths(state), Boolean(state.grants?.network)),
-            '--', bash, '-c', 'exit 0'], state.target);
+            '--', bash, '-c', 'exit 0'], state.target, SANDBOX_TIMEOUT);
         } catch (error) {
           throw new Error(`${error.code ?? error.message}。${gitBashRecovery}`);
         }

@@ -122,7 +122,8 @@ test('隔離runner: 失敗→登録→retry→元ファイルなしでpromptを�
   const { state, path, base } = fixture(t);
   const check = async () => ({ ok: true });
   const limits = async () => ({ limits: null, failure: null });
-  await step(state, async () => { throw new Error('測定値を読めないサンドボックス'); }, base, check, limits);
+  await step(state, async () => ({ report, returnTo: 'none', outcome: 'error', cause: 'environment',
+    summary: '測定値を読めないサンドボックス', question: '', tasks: [] }), base, check, limits);
   assert.equal(state.status, 'failed');
   registerEvidence(state, path, base);
   unlinkSync(path);
@@ -131,7 +132,7 @@ test('隔離runner: 失敗→登録→retry→元ファイルなしでpromptを�
     const input = readFileSync(join(dir, 'prompt.txt'), 'utf8');
     assert.match(input, /空き容量 8 GiB/);
     assert.equal(inputFor(current), input);
-    return { report, returnTo: 'none', outcome: 'question', summary: '証拠を入力から参照できた', question: '続行条件は？', tasks: [] };
+    return { report, returnTo: 'none', outcome: 'question', cause: '', summary: '証拠を入力から参照できた', question: '続行条件は？', tasks: [] };
   }, base, check, limits);
   assert.equal(state.status, 'waiting');
   assert.deepEqual(state.metrics.at(-1).externalEvidence, [{ id: 1, valid: true }]);

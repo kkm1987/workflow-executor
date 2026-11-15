@@ -131,8 +131,13 @@ test('合図付きrunは独立対象で工程を重ね、工程間・例外時�
   wa.send({});
   assert.deepEqual(await wa.next(), { type: 'stage', stage: 'execute' });
   assert.throws(() => reserve(base, () => ({ id: randomUUID(), paths: [a] })), /競合/);
+  wa.send({ fail: true });
+  assert.deepEqual(await wa.next(), { type: 'stage', stage: 'execute' });
+  assert.throws(() => reserve(base, () => ({ id: randomUUID(), paths: [a] })), /競合/);
   wa.send({ fail: true }); await finish(wa);
-  assert.equal(load(sa.id, base).status, 'failed');
+  const failed = load(sa.id, base);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.failureStreak.count, 2);
   const release = reserve(base, () => ({ id: sa.id, paths: [a] })); release();
   for (const stage of ['execute', 'review', 'acceptance']) { wb.send({}); assert.deepEqual(await wb.next(), { type: 'stage', stage }); }
   wb.send({}); await finish(wb);

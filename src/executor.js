@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, saveActivity, event, advance, resolveInquiry, prompt, targetTask, attemptScope, sameScope } from './workflow.js';
+import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { tokenMetrics, performanceReport } from './metrics.js';
@@ -36,7 +36,10 @@ export function inputFor(state) {
   if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
   const last = state.answers.at(-1);
   if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' + last.answer;
-  return (last.approval ? '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\n' : '') + last.answer;
+  const answer = (last.approval ? '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\n' : '') + last.answer;
+  return state.stage === 'prereview'
+    ? answer + '\n承認項目に使えるID（継続: retain、変更元: replace）\n' + JSON.stringify(approvalIds(state))
+    : answer;
 }
 
 export function codexSandbox(state) {
@@ -269,7 +272,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
       try { return readFileSync(join(dir, file), 'utf8'); } catch { return ''; }
     }).join('\n');
     if (limitError(logs)) failure.limited = true;
-    throw failure;
+    throw Object.assign(failure, { kind: 'process' });
   }
   return result;
 }
@@ -311,8 +314,20 @@ export async function runAgent(state, dir, command, prefix = []) {
 // 既存の呼び出し元とテスト向けの公開名を維持する。
 export const runCodex = runAgent;
 
+function recordFailure(state, scope, error, value, attempt) {
+  const previous = sameScope(state.failureStreak, scope) ? state.failureStreak : null;
+  const evidence = attempt === null ? null : state.evidence?.findLast(entry => entry.attempt === attempt);
+  const entry = { attempt, cli: value?.cli ?? null, model: value?.model ?? null,
+    error: String(error.message).slice(0, 500), kind: error.kind,
+    changedFiles: [...new Set([...(evidence?.changedFiles ?? []), ...(evidence?.openspec?.changedFiles ?? [])])] };
+  state.failureStreak = { ...scope, count: (previous?.count ?? 0) + 1, entries: [...(previous?.entries ?? []), entry] };
+  delete state.session;
+}
+
 async function prepare(state, base, check) {
-  const report = await check(state);
+  let report;
+  try { report = await check(state); }
+  catch (error) { report = { ok: false, error: error?.message ?? String(error) }; }
   if (report.execpolicyRules) state.execpolicyRules = report.execpolicyRules;
   if (report.executables) state.executables = { ...state.executables, ...report.executables };
   const dir = directory(state.id, base);
@@ -320,10 +335,16 @@ async function prepare(state, base, check) {
   writeFileSync(path, JSON.stringify(report, null, 2));
   event(state, 'preflight', { path, ...report }, base);
   if (!report.ok) {
-    state.status = 'failed';
-    state.error = report.error;
-    state.question = '';
-    event(state, 'failed', report.error, base);
+    const error = Object.assign(new Error(report.error || '実行前確認に失敗しました'), { kind: 'preflight' });
+    if (state.answers.at(-1)?.inquiry) {
+      resolveInquiry(state, { outcome: 'error', summary: error.message });
+    } else {
+      state.status = 'failed';
+      state.error = error.message;
+      state.question = '';
+      recordFailure(state, attemptScope(state), error, state.attemptAssignment, null);
+    }
+    event(state, state.status, error.message, base);
     save(state, base);
   }
   return report.ok;
@@ -341,6 +362,7 @@ async function reviewAnswers(state, result, dir, review) {
   if (state.stage !== 'prereview' || result?.outcome !== 'ok' || !Array.isArray(result.approvals)) return {};
   const reviews = {};
   for (const [index, item] of result.approvals.entries()) {
+    if (state.approval?.returned?.some(entry => entry.id === item?.replaces)) continue;
     const before = planItems(state).find(entry => entry.id === item?.replaces);
     const basis = state.answers[(item?.basisAnswer ?? 0) - 1];
     if (!before || !basis || basis.inquiry || item.gate !== 'plan') continue;
@@ -377,26 +399,23 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   const normal = assignment(state, config);
   const fallback = fallbackAssignment(state, config);
   const scope = attemptScope(state);
-  if (!sameScope(state.envFallback, scope)) delete state.envFallback;
-  const envFallback = sameScope(state.envFallback, scope);
   let value = normal;
   const normalResult = await limits(state, normal);
   let beforeLimits = normalResult.limits;
   const selection = { stage: state.stage, normal: { ...normal, rateLimits: beforeLimits }, fallback: fallback ? { ...fallback, rateLimits: null } : null,
     reason: beforeLimits ? '通常側の利用枠が十分' : '通常側の利用枠が未取得', selected: normal };
   if (normalResult.failure) selection.normal.rateLimitsFailure = normalResult.failure;
-  if (envFallback || insufficient(beforeLimits, config.limits[state.stage])) {
+  if (insufficient(beforeLimits, config.limits[state.stage])) {
     const alternativeResult = fallback ? await limits(state, fallback) : null;
     const alternative = alternativeResult?.limits;
     if (alternativeResult?.failure) selection.fallback.rateLimitsFailure = alternativeResult.failure;
     if (fallback) selection.fallback.rateLimits = alternative;
     if (fallback && (alternative?.primary || alternative?.secondary) && !insufficient(alternative, config.limits[state.stage])) {
       value = fallback; beforeLimits = alternative;
-      selection.reason = envFallback ? '通常側の失敗により代替を選択' : '通常側の利用枠不足により代替を選択'; selection.selected = fallback;
+      selection.reason = '通常側の利用枠不足により代替を選択'; selection.selected = fallback;
     } else {
       selection.reason = !fallback ? '通常側の利用枠不足・代替未指定' : !alternative?.primary && !alternative?.secondary ? '通常側の利用枠不足・代替の利用枠が未取得' : '通常側・代替とも利用枠不足';
       selection.selected = null;
-      if (envFallback) selection.reason = !fallback ? '通常側の失敗・代替未指定' : !alternative?.primary && !alternative?.secondary ? '通常側の失敗・代替の利用枠が未取得' : '通常側の失敗・代替の利用枠不足';
     }
   }
   state.selection = selection;
@@ -437,9 +456,10 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   save(state, base);
   event(state, 'started', { stage: state.stage, attempt: state.attempts }, base);
   let heartbeatError;
+  let failure;
   const heartbeat = setInterval(() => {
     try { saveActivity(state, base); } catch (error) {
-      heartbeatError = error;
+      heartbeatError = Object.assign(error, { kind: 'process' });
       clearInterval(heartbeat);
     }
   }, 10_000);
@@ -450,9 +470,11 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
     if (!inquiry && state.stage === 'prereview') {
       const evidence = state.evidence?.findLast(entry => entry.attempt === state.attempts);
-      await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence);
+      try { await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence); }
+      catch (error) { throw Object.assign(error, { kind: 'invalid' }); }
     }
     if (result?.outcome === 'error' && limitError(result.summary)) {
+      if (!inquiry) validateResult(result, state.stage, state);
       const error = new Error(result.summary);
       error.limited = true;
       throw error;
@@ -463,31 +485,33 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     }
     if (inquiry) resolveInquiry(state, result);
     else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base) });
+    if (state.status === 'failed') {
+      failure = Object.assign(new Error(result.summary), { kind: `reported-${result.cause}` });
+    }
     if (state.status !== 'waiting') delete state.session;
     if (state.status === 'waiting' && (inquiry || !['partial', 'replan'].includes(result.outcome)) && metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     metric.outcome = result.outcome;
     event(state, state.status === 'completed' ? 'completed' : state.status === 'failed' ? 'failed' : 'finished', result, base);
   } catch (error) {
-    state.status = error.limited || limitError(error.message) ? 'limited' : 'failed';
+    const message = error?.message ?? String(error);
+    state.status = error?.limited || limitError(message) ? 'limited' : 'failed';
     if (inquiry && state.status !== 'limited') {
-      resolveInquiry(state, { outcome: 'error', summary: error.message });
+      resolveInquiry(state, { outcome: 'error', summary: message });
       try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
       if (metric.sessionId) state.session = { stage: metric.stage, ...value, sessionId: metric.sessionId, externalEvidence: metric.externalEvidence };
     } else {
-      state.error = error.message;
+      state.error = message;
       delete state.session;
+      failure = { message, kind: error?.kind ?? 'process' };
     }
     metric.outcome = 'error';
-    event(state, state.status, error.message, base);
+    event(state, state.status, message, base);
   } finally {
     clearInterval(heartbeat);
-    if (state.status === 'failed') {
-      const previous = sameScope(state.failureStreak, scope) ? state.failureStreak : null;
-      state.failureStreak = { ...scope, count: (previous?.count ?? 0) + 1,
-        entries: [...(previous?.entries ?? []), { attempt: state.attempts, cli: value.cli, model: value.model, error: String(state.error).slice(0, 500) }].slice(-3) };
-      delete state.session;
-    } else delete state.failureStreak;
-    if (!sameScope(state.envFallback, attemptScope(state))) delete state.envFallback;
+    if (!inquiry) {
+      if (state.status === 'failed') recordFailure(state, scope, failure, value, state.attempts);
+      else if (state.status !== 'limited') delete state.failureStreak;
+    }
     const invocationPath = join(dir, 'invocation.json');
     const invocation = JSON.parse(readFileSync(invocationPath, 'utf8'));
     writeFileSync(invocationPath, JSON.stringify({ ...invocation, activity: state.activity }, null, 2));
@@ -506,9 +530,9 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     delete state.attemptAssignment;
     save(state, base);
   }
-  if (metric.status === 'failed' && ((fallback && value === normal && !envFallback) || (resumed && state.failureStreak.count === 1))) {
-    if (fallback && value === normal && !envFallback) state.envFallback = scope;
-    event(state, 'failure_retry', { attempt: state.attempts, error: state.error, envFallback: state.envFallback ?? null }, base);
+  const kind = state.failureStreak?.entries.at(-1)?.kind;
+  if (metric.status === 'failed' && state.failureStreak.count === 1 && ['process', 'invalid', 'reported-transient'].includes(kind)) {
+    event(state, 'failure_retry', { attempt: state.attempts, error: state.error, kind }, base);
     state.status = 'ready';
     delete state.error;
     save(state, base);

@@ -10,7 +10,7 @@ import { step, runAgent } from '../src/executor.js';
 import { fakeCodex } from './fixtures/codex.js';
 
 const report = { scope: 'sample.txt / 正常を含む', decisions: [], verification: '未検証', remaining: '読み取り確認' };
-const result = { returnTo: 'none', outcome: 'ok', summary: '確認', question: '', tasks: [], report };
+const result = { returnTo: 'none', outcome: 'ok', cause: '', summary: '確認', question: '', tasks: [], report };
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'progress-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

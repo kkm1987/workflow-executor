@@ -12,7 +12,7 @@ import { fakeCodex } from './fixtures/codex.js';
 const method = 'item/commandExecution/requestApproval';
 const command = 'Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name';
 const params = (text = command) => ({ command: `pwsh -Command '${text}'`, commandActions: [{ type: 'unknown', command: text }], cwd: 'target', reason: 'CIM取得' });
-const result = { returnTo: 'none', outcome: 'ok', summary: '確認済み', question: '', tasks: [],
+const result = { returnTo: 'none', outcome: 'ok', cause: '', summary: '確認済み', question: '', tasks: [],
   report: { scope: 'CIM', decisions: [], verification: '取得結果', remaining: 'なし' } };
 const permission = { ...result, outcome: 'permission', question: 'CIM取得が必要。許可しない場合は検証できません。', permission: { network: false, paths: [], commands: [command] } };
 const jsonLines = path => readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);

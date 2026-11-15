@@ -8,7 +8,7 @@ import { root, create, advance, answer, approve, grant, load, prompt, summary, s
 import { runAgent, step, claudeArgs } from '../src/executor.js';
 import { readConfig } from '../src/config.js';
 import { codexSession, escalationDecision } from '../src/codex-app-server.js';
-import { resolveScript, safeGitRead, commandDecision, reviewCommand, reviewProblem, codexReview } from '../src/escalation.js';
+import { resolveScript, safeGitRead, commandDecision, reviewCommand, reviewProblem, codexReview, reviewPrompt } from '../src/escalation.js';
 import { decide, gateRequired, gateSettings, probeSettings } from '../src/claude-gate.js';
 import { preflight } from '../src/preflight.js';
 import { sandboxProfileArgs, resolveGitBash } from '../src/commands.js';
@@ -19,7 +19,7 @@ const params = (command, cwd) => ({ command, commandActions: [{ type: 'unknown',
 const item = { id: 'A1', tasks: '1.1', action: 'storeへ公開', limits: '1回', stopWhen: '失敗', gate: 'plan',
   scripts: [], files: [], effect: 'external', costCheck: '', grants: { network: false, paths: [] } };
 const plan = { status: 'approved', items: [item, { ...item, id: 'A2', gate: 'each' }], pending: [], conditions: '条件', nextId: 3 };
-const ok = { returnTo: 'none', outcome: 'ok', summary: '完了', question: '', tasks: [], report: { scope: '対象', decisions: [], verification: '確認', remaining: 'なし' } };
+const ok = { returnTo: 'none', outcome: 'ok', cause: '', summary: '完了', question: '', tasks: [], report: { scope: '対象', decisions: [], verification: '確認', remaining: 'なし' } };
 const allow = { decision: 'allow', approvalId: 'A1', riskLevel: 'low', rationale: '計画の範囲内' };
 
 function fixture(t) {
@@ -232,7 +232,7 @@ test('回答を根拠とする変更は審査で置き換え、範囲外は承�
   Object.assign(state, { kind: 'change', change: 'sample-change', stage: 'prereview', approval: structuredClone(plan), answers: [{ answer: '上限は3回' }] });
   const { path, hash } = resolveScript('& ./upload.ps1', target, target);
   const pinned = { 'upload.ps1': { path, hash } };
-  Object.assign(state.approval.items[0], { scripts: ['upload.ps1'], pinned });
+  Object.assign(state.approval.items[0], { scripts: ['upload.ps1'], pinned, conditions: '転送元を記録する' });
   save(state, base);
   const changed = { ...item, scripts: ['upload.ps1'], limits: '3回', replaces: 'A1', basisAnswer: 1 };
   delete changed.id;
@@ -240,11 +240,18 @@ test('回答を根拠とする変更は審査で置き換え、範囲外は承�
   const passed = async () => ({ ok: true });
   const seen = [];
   const reviewer = output => async input => { seen.push(input); return output; };
+  const escalationInput = JSON.parse(reviewPrompt(state, { command: 'upload', cwd: target }, '必要').split('\n').at(-1));
+  assert.equal(escalationInput.approval.conditions, '条件');
+  assert.deepEqual(escalationInput.approval.items.map(entry => [entry.id, entry.conditions]), [['A1', '転送元を記録する'], ['A2', undefined]]);
   await step(state, async () => pre([changed], ['A2']), base, passed, noLimits, async () => {}, reviewer(allow));
   assert.equal(state.status, 'ready');
   assert.match(seen[0], /上限は3回/);
+  const answerInput = JSON.parse(seen[0].split('\n').at(-1));
+  assert.deepEqual([answerInput.before.conditions, answerInput.after.conditions, answerInput.conditions],
+    ['転送元を記録する', '転送元を記録する', '条件']);
   assert.deepEqual(state.approval.items.map(entry => [entry.id, entry.limits]), [['A2', '1回'], ['A1', '3回']]);
   assert.deepEqual(state.approval.items[1].pinned, pinned);
+  assert.equal(state.approval.items[1].conditions, '転送元を記録する');
   const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const replaced = events.find(entry => entry.type === 'approval_replaced').detail;
   assert.deepEqual([replaced.before.limits, replaced.after.limits, replaced.answer, replaced.review.rationale], ['1回', '3回', '上限は3回', '計画の範囲内']);
@@ -266,8 +273,9 @@ test('回答を根拠とする変更は審査で置き換え、範囲外は承�
 
 test('未知のIDの継続と二重指定を拒否し、新規項目だけを承認待ちにして旧状態を補完する', t => {
   const { state } = fixture(t);
-  Object.assign(state, { kind: 'change', stage: 'prereview', approval: structuredClone(plan) });
-  for (const value of [pre([], ['A9']), pre([{ ...item, replaces: 'A9' }]), pre([{ ...item, replaces: 'A1' }], ['A1']), { ...pre(), retainedApprovals: undefined }]) {
+  Object.assign(state, { kind: 'change', stage: 'prereview', approval: { ...structuredClone(plan), returned: [{ ...item, id: 'A4' }] } });
+  assert.doesNotThrow(() => validateResult(pre([{ ...item, replaces: 'A4' }], ['A1']), 'prereview', state));
+  for (const value of [pre([], ['A4']), pre([], ['A9']), pre([{ ...item, replaces: 'A9' }]), pre([{ ...item, replaces: 'A1' }], ['A1']), { ...pre(), retainedApprovals: undefined }]) {
     const before = structuredClone(state);
     assert.throws(() => advance(state, value), /ID/);
     assert.deepEqual(state, before);
@@ -282,6 +290,32 @@ test('未知のIDの継続と二重指定を拒否し、新規項目だけを承
   assert.equal(commandDecision({ stage: 'execute', answers: [], ...old }, 'other').reviewRequest, undefined);
   const waiting = normalizeApproval({ approval: { status: 'pending', items: [{ tasks: 'a' }] } }).approval;
   assert.deepEqual([waiting.items.length, waiting.pending.length], [0, 1]);
+});
+
+test('差し戻し済みの項目は失敗・質問で保持し、成功時に変更元へ使った分以外を除去して記録する', async t => {
+  const { base, state } = fixture(t);
+  Object.assign(state, { kind: 'change', change: 'sample-change', stage: 'prereview', approval: structuredClone(plan) });
+  const { id, ...proposal } = item;
+  advance(state, pre([{ ...proposal, replaces: 'A1' }, proposal], ['A2']));
+  answer(state, 'A1を見直し、A3を外す', base);
+  const returned = structuredClone(state.approval.returned);
+  assert.deepEqual(returned.map(entry => entry.id), ['A1', 'A3']);
+  for (const outcome of ['error', 'question']) {
+    advance(state, { ...pre(), outcome, cause: outcome === 'error' ? 'environment' : '', question: '確認が必要ですか？' });
+    assert.deepEqual(state.approval.returned, returned);
+  }
+  state.status = 'ready';
+  let reviewed = 0;
+  await step(state, async () => pre([{ ...proposal, replaces: 'A1', basisAnswer: 1 }], ['A2']),
+    base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }), async () => {},
+    async () => { reviewed++; });
+  assert.equal(reviewed, 0);
+  assert.equal(state.status, 'waiting');
+  assert.deepEqual(state.approval.items.map(entry => entry.id), ['A2', 'A1']);
+  assert.deepEqual(state.approval.pending.map(entry => entry.id), ['A1']);
+  assert.deepEqual(state.approval.returned, []);
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.find(entry => entry.type === 'approval_removed').detail, { items: [returned[1]], reason: 'returned' });
 });
 
 test('Claudeのフックは通常のBashをsandboxで包み、Edit・Writeを範囲内に限る', async t => {

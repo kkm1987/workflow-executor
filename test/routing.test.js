@@ -16,7 +16,7 @@ const report = { scope: '入力検証の実装と受け入れ条件', decisions:
 const passed = async () => ({ ok: true });
 const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
-const ok = { report, returnTo: 'none', outcome: 'ok', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
+const ok = { report, returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要', granularity: '同じ検証' } };
 
 test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
@@ -211,6 +211,7 @@ test('Claudeの引数・構造化出力・usageを解釈し、不正応答はfai
   await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base, passed, noLimits);
   assert.equal(state.status, 'failed');
   assert.match(state.error, /構造化出力/);
+  assert.deepEqual(state.failureStreak.entries.map(entry => entry.kind), ['process', 'process']);
   state.kind = 'change'; state.stage = 'prereview'; state.change = 'sample-change';
   assert.ok(inputFor(state).includes('作業ディレクトリは対象リポジトリなので移動しない。コマンドは連結せず1回に1つ実行する'));
   const args = claudeArgs(state, 'new-session');
@@ -221,6 +222,18 @@ test('Claudeの引数・構造化出力・usageを解釈し、不正応答はfai
   assert.ok(!args.includes('Bash'));
   for (const command of ['git status', 'git diff', 'git log', 'git show', 'ls']) assert.ok(args.includes(`Bash(${command}:*)`));
   assert.ok(!args.includes('Bash(git:*)'));
+});
+
+test('JSONとして解析できないCodex出力はprocessとして一度再試行する', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '試験', base);
+  const fake = join(target, 'invalid-json.cjs');
+  fakeCodex(fake, `notify('item/completed', {item: {type: 'agentMessage', id: 'final', text: '{invalid'}}); finish();`);
+  await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base, passed, noLimits);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.attempts, 2);
+  assert.deepEqual(state.failureStreak.entries.map(entry => entry.kind), ['process', 'process']);
+  assert.match(state.error, /JSON/);
 });
 
 test('preflightは使用するCLIだけを検査し、同じCodexパスと版を保存する', async t => {
@@ -263,7 +276,7 @@ test('質問のセッションは回答だけで再開し、進行・変更・re
   assert.equal(state.session, undefined);
 });
 
-test('承認計画への回答は同じ担当のセッションへ説明と回答だけを渡し、担当・証拠の変更で新規になる', async t => {
+test('承認計画への回答は同じ担当のセッションへ説明・回答・IDを渡し、担当・証拠の変更で新規になる', async t => {
   const { target, base } = fixture(t);
   for (const model of ['gpt-6-luna', 'claude-opus-5-5']) {
     const state = create(target, '試験', base);
@@ -278,7 +291,7 @@ test('承認計画への回答は同じ担当のセッションへ説明と回�
     assert.equal(state.session.stage, 'prereview');
     answer(state, 'VMは使用しない', base);
     const saved = structuredClone(state.session);
-    const expected = '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\nVMは使用しない';
+    const expected = '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\nVMは使用しない\n承認項目に使えるID（継続: retain、変更元: replace）\n{"retain":[],"replace":["A1"]}';
     assert.equal(inputFor(state), expected);
     const args = () => assignment(state).cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, '新規');
     const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';
@@ -456,12 +469,17 @@ test('prereviewの範囲外変更と検証失敗はfailedにし、選定前の�
   const { target, base } = fixture(t);
   const state = await startChange(target, 'sample-change', {}, base,
     async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
+  let retryInput;
   await step(state, async current => {
-    current.evidence = [{ attempt: current.attempts, changedFiles: ['src/outside.js'] }];
+    if (current.attempts === 2) retryInput = JSON.parse(inputFor(current).split('\n').at(-1));
+    current.evidence ??= [];
+    current.evidence.push({ attempt: current.attempts, changedFiles: ['src/outside.js'] });
     return prereview;
   }, base, passed, noLimits);
   assert.equal(state.status, 'failed');
   assert.match(state.error, /ディレクトリ外/);
+  assert.deepEqual(retryInput.failures.map(entry => [entry.kind, entry.changedFiles]), [['invalid', ['src/outside.js']]]);
+  assert.deepEqual(state.failureStreak.entries.map(entry => entry.kind), ['invalid', 'invalid']);
   retry(state, base);
   await step(state, async current => {
     current.evidence.push({ attempt: current.attempts, changedFiles: ['openspec/changes/sample-change/tasks.md'] });
