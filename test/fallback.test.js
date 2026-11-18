@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { root, create, load, setModel, setFallback, save, answer, retry, summary, brief } from '../src/workflow.js';
 import { assignment, attemptAssignment, fallbackAssignment, readConfig, validateAssignments } from '../src/config.js';
 import { step, run, runAgent, inputFor, resumeSession, codexArgs, claudeArgs } from '../src/executor.js';
 import { preflight, checkGrantAccess } from '../src/preflight.js';
-import { sandboxProfileArgs } from '../src/commands.js';
 import { fakeCodex } from './fixtures/codex.js';
 
 const codex = { model: 'gpt-6-luna', effort: 'high' };
@@ -32,41 +31,46 @@ test('設定の既定値・上書き・明示無効化を検証し、不正値�
   const config = readConfig();
   const file = join(dir, 'config.json');
   const read = () => { writeFileSync(file, JSON.stringify(config)); return readConfig(file); };
-  const state = { kind: 'request', stage: 'execute' };
+  const state = { kind: 'request', stage: 'plan' };
   assert.equal(fallbackAssignment(state, config), null);
-  config.fallbacks = { request: { execute: claude } };
+  config.fallbacks = { request: { plan: claude } };
   assert.equal(fallbackAssignment(state, read()).cli, 'claude');
-  assert.equal(fallbackAssignment({ ...state, fallbacks: { execute: null } }, config), null);
-  assert.equal(fallbackAssignment({ ...state, fallbacks: { execute: { ...claude, effort: 'low' } } }, config).effort, 'low');
+  assert.equal(fallbackAssignment({ ...state, fallbacks: { plan: null } }, config), null);
+  assert.equal(fallbackAssignment({ ...state, fallbacks: { plan: { ...claude, effort: 'low' } } }, config).effort, 'low');
   for (const value of [{}, { model: null }, { model: '' }, { ...claude, effort: 'ultra' }, codex, [], 'claude']) {
-    config.fallbacks.request.execute = value;
+    config.fallbacks.request.plan = value;
     assert.throws(read);
   }
   config.fallbacks.request = { unknown: claude };
   assert.throws(read, /工程/);
   config.fallbacks = [];
   assert.throws(read);
-  assert.throws(() => validateAssignments({ ...state, fallbacks: { execute: {} } }));
+  assert.throws(() => validateAssignments({ ...state, fallbacks: { plan: {} } }));
+  config.fallbacks = { request: { execute: claude } };
+  assert.throws(read, /executeに代替モデル/);
+  delete config.fallbacks;
+  config.models.request.execute = claude;
+  assert.throws(read, /executeにはCodex/);
 });
 
 test('停止中の変更は保存・再読込でき、不正操作はメモリと保存状態と履歴を変えない', t => {
   const { target, base } = fixture(t);
-  const state = create(target, '要求', base, undefined, { models: { execute: codex }, fallbacks: { execute: claude } });
-  assert.equal(fallbackAssignment({ ...load(state.id, base), stage: 'execute' }).cli, 'claude');
+  const state = create(target, '要求', base, undefined, { models: { plan: codex }, fallbacks: { plan: claude } });
+  assert.equal(fallbackAssignment({ ...load(state.id, base), stage: 'plan' }).cli, 'claude');
   for (const status of ['waiting', 'limited']) {
     Object.assign(state, { status, question: '確認', waitingFor: 'question' });
     save(state, base);
-    setFallback(state, 'execute', null, undefined, base);
+    setFallback(state, 'plan', null, undefined, base);
     assert.equal(state.status, status);
     assert.equal(state.question, '確認');
-    assert.equal(load(state.id, base).fallbacks.execute, null);
-    setFallback(state, 'execute', claude.model, claude.effort, base);
+    assert.equal(load(state.id, base).fallbacks.plan, null);
+    setFallback(state, 'plan', claude.model, claude.effort, base);
     const before = JSON.stringify(state);
     const saved = readFileSync(join(base, state.id, 'state.json'), 'utf8');
     const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8');
     for (const action of [
-      () => setFallback(state, 'execute', codex.model, codex.effort, base),
-      () => setModel(state, 'execute', claude.model, claude.effort, base),
+      () => setFallback(state, 'plan', codex.model, codex.effort, base),
+      () => setModel(state, 'plan', claude.model, claude.effort, base),
       () => setFallback(state, 'missing', claude.model, undefined, base),
     ]) {
       assert.throws(action);
@@ -88,24 +92,31 @@ test('CLIのstart・start-change・fallback・disableは引数を保存し、不
   const request = join(dir, 'request.md');
   writeFileSync(request, '試験要求');
   const cli = (...args) => JSON.parse(execFileSync(process.execPath, [join(app, 'src/cli.js'), ...args], { cwd: app, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-  const view = cli('start', target, request, '--fallback', 'execute', claude.model, claude.effort, '--model', 'execute', codex.model);
+  for (const args of [['--model', 'execute', claude.model], ['--fallback', 'execute', claude.model]]) {
+    assert.throws(() => cli('start', target, request, ...args));
+  }
+  const view = cli('start', target, request, '--fallback', 'plan', claude.model, claude.effort, '--model', 'execute', codex.model);
   const path = join(app, 'data', view.id, 'state.json');
   let state = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(state.fallbacks.execute.model, claude.model);
+  assert.equal(state.fallbacks.plan.model, claude.model);
   state.status = 'waiting'; state.question = '確認'; writeFileSync(path, JSON.stringify(state));
-  cli('fallback', view.id, 'execute', '--disable');
+  cli('fallback', view.id, 'plan', '--disable');
   state = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(state.fallbacks.execute, null);
+  assert.equal(state.fallbacks.plan, null);
   assert.equal(state.status, 'waiting'); assert.equal(state.question, '確認');
-  cli('fallback', view.id, 'execute', claude.model, 'low');
+  cli('fallback', view.id, 'plan', claude.model, 'low');
   const before = readFileSync(path, 'utf8');
+  const events = join(app, 'data', view.id, 'events.jsonl');
+  const beforeEvents = readFileSync(events, 'utf8');
+  assert.throws(() => cli('fallback', view.id, 'execute', claude.model));
   assert.throws(() => cli('model', view.id, 'execute', claude.model));
-  assert.throws(() => cli('fallback', view.id, 'execute', '--disable', 'extra'));
+  assert.throws(() => cli('fallback', view.id, 'plan', '--disable', 'extra'));
   assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(readFileSync(events, 'utf8'), beforeEvents);
   const change = join(target, 'openspec', 'changes', 'sample');
   mkdirSync(change, { recursive: true });
   writeFileSync(join(change, 'tasks.md'), '- [ ] 実装\n');
-  const changeView = cli('start-change', target, 'sample', '--fallback', 'prereview', codex.model, 'high', '--fallback', 'execute', claude.model);
+  const changeView = cli('start-change', target, 'sample', '--fallback', 'prereview', codex.model, 'high');
   assert.equal(JSON.parse(readFileSync(join(app, 'data', changeView.id, 'state.json'), 'utf8')).fallbacks.prereview.model, codex.model);
   const help = execFileSync(process.execPath, [join(app, 'src/cli.js'), '--help'], { encoding: 'utf8' });
   assert.match(help, /--fallback/); assert.match(help, /--disable/);
@@ -192,6 +203,24 @@ test('模擬CLIの代替起動は引数・入力・invocation・metrics・status
   }
 });
 
+test('承認判断者を受け付けないapp-serverではモデルを呼ばずfailedとする', async t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '要求', base);
+  state.stage = 'execute';
+  await step(state, () => assert.fail('モデルを呼ばない'), base, current => preflight(current, async (_, args, cwd, timeout, thread) => {
+    if (args[0] === 'app-server') {
+      assert.equal(cwd, target);
+      assert.equal(thread.approvalsReviewer, 'auto_review');
+      assert.equal(thread.ephemeral, true);
+      throw new Error('app-serverの承認判断者が一致しません');
+    }
+    return '{"loggedIn":true}';
+  }, () => 'codex', () => 'claude'), async () => ({ limits: enough }));
+  assert.equal(state.attempts, 0);
+  assert.equal(state.status, 'failed');
+  assert.match(state.error, /Codexの承認判断者.*一致しません/);
+});
+
 test('代替確認の失敗はfailed・0試行、未選択CLIは未確認、同じrunの確認は再利用する', async t => {
   const { target, base } = fixture(t);
   const make = () => create(target, '要求', base, undefined, { fallbacks: { plan: claude } });
@@ -206,29 +235,28 @@ test('代替確認の失敗はfailed・0試行、未選択CLIは未確認、同�
   await step(normal, async () => ok, base, async current => { checks++; assert.equal(current.attemptAssignment, undefined); return { ok: true }; }, async () => ({ limits: enough, failure: null }));
   assert.equal(checks, 1);
   const state = make();
-  state.stage = 'execute'; state.fallbacks = { execute: claude }; state.tasks = [{ ...ok.tasks[0], status: 'pending' }];
+  state.stage = 'execute'; state.tasks = [{ ...ok.tasks[0], status: 'pending' }];
   let executions = 0; checks = 0;
   await run(state, async () => { executions++; return executions === 1 ? { ...ok, outcome: 'partial' } : { ...ok, outcome: 'question', question: '確認' }; }, base, undefined,
-    async () => { checks++; return { ok: true }; }, async (_, value) => ({ limits: value.cli === 'codex' ? low : enough, failure: null }));
-  assert.equal(checks, 2); assert.equal(executions, 2);
+    async () => { checks++; return { ok: true }; }, async () => ({ limits: enough, failure: null }));
+  assert.equal(checks, 1); assert.equal(executions, 2);
   answer(state, '回答', base);
-  await step(state, async () => ({ ...ok, outcome: 'question', question: '確認' }), base, async () => { checks++; return { ok: true }; }, async (_, value) => ({ limits: value.cli === 'codex' ? low : enough, failure: null }));
-  assert.equal(checks, 4);
+  await step(state, async () => ({ ...ok, outcome: 'question', question: '確認' }), base, async () => { checks++; return { ok: true }; }, async () => ({ limits: enough, failure: null }));
+  assert.equal(checks, 2);
 });
 
 test('選択CLIの権限確認と双方向の引数は承認・許可・工程制限を保持する', async t => {
   const { target, base } = fixture(t);
-  const env = process.env;
-  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: join(target, 'bash.exe') };
-  t.after(() => { process.env = env; });
   const state = create(target, '要求', base);
   state.grants = { paths: [base], network: true };
   state.approval = { status: 'approved', items: [{ tasks: '実装', action: '検証', limits: '対象内', stopWhen: '失敗' }], conditions: '条件を保持' };
   for (const [normal, fallback] of [[codex, claude], [claude, codex]]) {
     for (const stage of ['prereview', 'execute', 'review']) {
-      Object.assign(state, { kind: 'change', change: 'sample', stage, models: { [stage]: normal }, attemptAssignment: { ...fallback, cli: fallback === codex ? 'codex' : 'claude' } });
+      if (stage === 'execute' && fallback !== codex) continue;
+      Object.assign(state, { kind: 'change', change: 'sample', stage, models: { [stage]: stage === 'execute' ? codex : normal },
+        attemptAssignment: { ...fallback, cli: fallback === codex ? 'codex' : 'claude' } });
       const value = attemptAssignment(state);
-      const args = value.cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, 'new');
+      const args = value.cli === 'codex' ? codexArgs(state) : claudeArgs(state, 'new');
       assert.ok(args.includes(fallback.model) || args.includes(`model=${JSON.stringify(fallback.model)}`));
       assert.match(inputFor(state), /条件を保持/);
       if (value.cli === 'codex') {
@@ -236,65 +264,23 @@ test('選択CLIの権限確認と双方向の引数は承認・許可・工程�
         assert.ok(args.includes(`approval_policy="${stage === 'execute' ? 'on-request' : 'never'}"`));
       } else {
         assert.ok(args.includes('dontAsk'));
-        assert.equal(args.includes('Bash'), stage === 'execute');
-        assert.equal(args.includes('Write'), stage === 'execute');
+        assert.ok(!args.includes('Bash'));
+        assert.ok(!args.includes('Write'));
         if (stage === 'prereview') assert.ok(args.some(arg => arg.startsWith('Write(')));
       }
       let sandbox = 0;
       await checkGrantAccess(state, [base], async () => { sandbox++; });
-      assert.equal(sandbox, value.cli === 'codex' ? 1 : 0);
+      assert.equal(sandbox, 1);
       if (stage === 'execute') {
         let accessChecks = 0;
         const report = await preflight(state, async (_, args) => {
           if (args[0] === 'sandbox' && args.includes('workflow-grant') && !args.includes('exit 0')) accessChecks++;
-          return args.includes('--settings') ? 'workflow-gate-probe' : '{"loggedIn":true}';
+          return '{"loggedIn":true}';
         }, () => 'codex', () => 'claude', async () => JSON.stringify({ root: { path: target } }));
         assert.equal(report.ok, true);
         if (process.platform === 'win32') assert.equal(accessChecks, value.cli === 'codex' ? 1 : 0);
       }
     }
-  }
-});
-
-test('Git Bashの不備はClaude代替の試行前に記録し、Codexだけの試行は続行する', { skip: process.platform !== 'win32' }, async t => {
-  const { target, base } = fixture(t);
-  const env = process.env;
-  process.env = { ...env, PATH: target, CLAUDE_CODE_GIT_BASH_PATH: '' };
-  t.after(() => { process.env = env; });
-  const bash = join(target, 'bash.exe');
-  const recovery = /Git Bash.*Git for Windows.*CLAUDE_CODE_GIT_BASH_PATH/;
-  for (const mode of ['missing', 'sandbox failure', 'codex']) {
-    if (mode === 'sandbox failure') process.env.CLAUDE_CODE_GIT_BASH_PATH = bash;
-    if (mode === 'codex') process.env.CLAUDE_CODE_GIT_BASH_PATH = '';
-    const state = create(target, '要求', base, undefined, { models: { execute: codex }, fallbacks: { execute: claude } });
-    Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }] });
-    const argsSeen = [];
-    let models = 0;
-    await step(state, async () => { models++; return ok; }, base, current => preflight(current, async (_, args) => {
-      argsSeen.push(args);
-      if (args.includes('exit 0')) throw new Error('アクセス拒否 (終了コード 1)');
-      return '{"loggedIn":true}';
-    }, () => 'codex', () => 'claude'), async (_, value) => ({
-      limits: mode === 'codex' || value.cli === 'claude' ? enough : low, failure: null,
-    }));
-    const dir = join(base, state.id);
-    const records = readdirSync(dir).filter(name => name.startsWith('preflight-'))
-      .map(name => JSON.parse(readFileSync(join(dir, name), 'utf8')));
-    const checks = records.flatMap(record => record.checks).filter(check => check.name === 'Git Bash');
-    assert.equal(argsSeen.some(args => args.includes('--settings')), false);
-    if (mode === 'codex') {
-      assert.equal(models, 1);
-      assert.notEqual(state.status, 'failed');
-      assert.deepEqual(checks, []);
-    } else {
-      assert.equal(models, 0);
-      assert.equal(state.attempts, 0);
-      assert.equal(state.status, 'failed');
-      assert.match(state.error, recovery);
-      assert.deepEqual(checks, [{ name: 'Git Bash', ok: false, error: state.error }]);
-    }
-    assert.deepEqual(argsSeen.filter(args => args.includes('exit 0')), mode === 'sandbox failure'
-      ? [['sandbox', ...sandboxProfileArgs(target, []), '--', bash, '-c', 'exit 0']] : []);
   }
 });
 
@@ -342,22 +328,33 @@ test('代替実行途中の上限は自動再試行せず、retry後は通常か
   assert.equal(state.metrics[1].cli, 'codex');
 });
 
-test('統合: 枠不足で代替実装し、独立レビューを通り次の実装で通常へ復帰する', async t => {
+test('旧executeモデルは実行前確認で拒否し、保存済みの代替は残したまま無視する', async t => {
   const { target, base } = fixture(t);
-  const state = create(target, '要求', base, undefined, { fallbacks: { execute: claude } });
-  let executeCount = 0;
-  const observed = [];
-  await run(state, async current => {
-    observed.push([current.stage, attemptAssignment(current).cli]);
-    if (current.stage === 'execute') executeCount++;
-    return { ...ok, tasks: current.stage === 'plan' ? [...ok.tasks, { title: '次の実装', acceptance: '確認' }] : [] };
-  }, base, undefined, passed, async (current, value) => ({ limits: current.stage === 'execute' && executeCount === 0 && value.cli === 'codex' ? low : enough, failure: null }));
-  assert.deepEqual(observed, [['plan', 'codex'], ['execute', 'claude'], ['review', 'codex'], ['execute', 'codex'], ['review', 'codex'], ['acceptance', 'codex']]);
-  assert.equal(state.status, 'completed');
-  const saved = readFileSync(join(base, state.id, 'state.json'), 'utf8');
+  const state = create(target, '要求', base);
+  state.stage = 'execute';
+  state.models = { execute: claude };
+  state.fallbacks = { execute: claude };
+  save(state, base);
+
   const loaded = load(state.id, base);
-  assert.equal(summary(loaded, base).history[1].cli, 'claude');
-  assert.equal(readFileSync(join(base, state.id, 'state.json'), 'utf8'), saved);
+  await step(loaded, () => assert.fail('モデルを起動しない'), base,
+    current => preflight(current, () => assert.fail('CLIを起動しない')), () => assert.fail('枠は照会しない'));
+  assert.equal(loaded.status, 'failed');
+  assert.equal(loaded.attempts, 0);
+  assert.ok(loaded.error.includes(`model ${state.id} execute <Codexのモデル>`));
+  assert.deepEqual(load(state.id, base).models, state.models);
+  assert.deepEqual(load(state.id, base).fallbacks, state.fallbacks);
+
+  setModel(loaded, 'execute', codex.model, codex.effort, base);
+  retry(loaded, base);
+  await step(loaded, () => assert.fail('代替を起動しない'), base, passed, async (_, value) => {
+    assert.equal(value.cli, 'codex');
+    return { limits: low };
+  });
+  assert.equal(loaded.status, 'limited');
+  assert.equal(loaded.attempts, 0);
+  assert.equal(loaded.selection.fallback, null);
+  assert.deepEqual(load(state.id, base).fallbacks, state.fallbacks);
 });
 
 test('進捗なしpartialは2回で止まり、回答後は同じタスクを新規入力で続ける', async t => {
@@ -406,7 +403,7 @@ test('対象またはOpenSpecの変更が進捗なしをリセットし、通算
 
 test('一時的な失敗後は通常枠で担当を選び直し、変更と承認の確認を新規入力に含める', async t => {
   const { target, base } = fixture(t);
-  const state = create(target, '要求', base, undefined, { fallbacks: { execute: claude } });
+  const state = create(target, '要求', base);
   Object.assign(state, { stage: 'execute', tasks: [{ ...ok.tasks[0], status: 'pending' }, { title: '次', acceptance: '確認', status: 'pending' }] });
   const observed = [];
   await run(state, async current => {

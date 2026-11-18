@@ -79,11 +79,11 @@ test('試行の対象・担当・報告を固定し、次タスク・モデル�
   }, base);
   assert.equal(state.stage, 'execute');
   assert.equal(state.work.scope, '第一の対象');
-  setModel(state, 'execute', 'claude-opus-5-5', 'medium', base);
+  setModel(state, 'execute', 'gpt-6-luna', 'medium', base);
   await checked(state, async current => {
     assert.equal(current.activity, null);
     assert.equal(current.work.scope, '第二の対象');
-    assert.equal(current.work.cli, 'claude');
+    assert.equal(current.work.model, 'gpt-6-luna');
     throw new Error('最終応答なし');
   }, base);
   const view = summary(state, base);
@@ -92,7 +92,7 @@ test('試行の対象・担当・報告を固定し、次タスク・モデル�
   assert.deepEqual(view.latestReport.report, report);
   assert.equal(view.history[1].report, null);
   assert.match(view.history[1].error, /最終応答なし/);
-  assert.match(view.history[1].log, /claude/);
+  assert.match(view.history[1].log, /codex/);
 });
 
 test('旧履歴はsummaryを残して未記録を示し、Markdownをエスケープし、表示で履歴を変更しない', t => {

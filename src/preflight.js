@@ -2,10 +2,10 @@ import { spawn } from 'node:child_process';
 import { statSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
-import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories, writablePaths } from './changes.js';
-import { resolveCodex, resolveExecutable, resolveGitBash, gitBashRecovery, spawnCommand, windowsSandboxArgs, sandboxProfileArgs } from './commands.js';
-import { assignment, attemptAssignment, stagesFor } from './config.js';
-import { probeSettings, gateRequired, PROBE_MARKER } from './claude-gate.js';
+import { openSpecRoot, storeArgs, runOpenSpec, separateOpenSpec, changeDirectories } from './changes.js';
+import { resolveCodex, resolveExecutable, spawnCommand, windowsSandboxArgs, sandboxProfileArgs } from './commands.js';
+import { assignment, codexApproval, stagesFor, validateExecuteAssignment } from './config.js';
+import { codexSession } from './codex-app-server.js';
 
 export function execpolicyRules(target, codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex')) {
   const records = [];
@@ -31,14 +31,11 @@ const SANDBOX_TIMEOUT = 120_000;
 
 export async function checkGrantAccess(state, paths, check = checkCommand) {
   if (!paths.length) return;
-  const codex = (state.attemptAssignment ?? assignment({ ...state, stage: 'execute' })).cli === 'codex';
   const roots = [...(state.grants?.paths ?? []), ...paths, ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
   for (const path of paths) {
     try {
-      if (codex) {
-        await check(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, roots),
-          '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target, SANDBOX_TIMEOUT);
-      } else readdirSync(path);
+      await check(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, roots),
+        '--', process.execPath, '-e', `require('node:fs').readdirSync(${JSON.stringify(path)})`], state.target, SANDBOX_TIMEOUT);
     } catch {
       throw new Error(`アクセス確認に失敗しました。OSのアクセス権・サンドボックス設定・管理ポリシーを確認してください: ${path}`);
     }
@@ -46,24 +43,33 @@ export async function checkGrantAccess(state, paths, check = checkCommand) {
 }
 
 // 出力には認証情報が含まれる可能性があるため、検査名と終了状態だけを保存する。
-export function checkCommand(command, args, cwd, timeout = 15_000) {
+export function checkCommand(command, args, cwd, timeout = 15_000, thread) {
   return new Promise((resolve, reject) => {
-    const child = spawnCommand(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnCommand(command, args, { cwd, stdio: [thread ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true });
     let output = '';
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', chunk => { output = (output + chunk).slice(-8192); });
     let diagnostic = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-8192); });
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const kill = () => {
       if (process.platform === 'win32' && child.pid) {
         const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
         killer.on('error', () => child.kill());
         killer.once('close', code => { if (code !== 0) child.kill(); });
       } else child.kill('SIGKILL');
-    }, timeout);
+    };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, timeout);
+    let probe;
+    if (thread) {
+      const fail = error => { reject(error); kill(); };
+      probe = codexSession(child, { thread, probe: true, emit: () => {}, raw: () => {}, complete: () => child.stdin.end(), fail });
+      child.stdin.on('error', fail);
+      child.stdout.on('data', chunk => { try { probe.receive(chunk); } catch (error) { fail(error); } });
+      probe.start();
+    } else {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', chunk => { output = (output + chunk).slice(-8192); });
+    }
     child.once('error', error => { clearTimeout(timer); reject(new Error(`起動失敗 (${error.code ?? 'unknown'})`)); });
     child.once('close', code => {
       clearTimeout(timer);
@@ -77,6 +83,7 @@ export function checkCommand(command, args, cwd, timeout = 15_000) {
           /アクセスが拒否|access is denied/i.test(diagnostic) ? 'アクセス拒否' : 'コマンドが失敗';
         reject(new Error(`${cause} (終了コード ${code})`));
       }
+      else if (probe && !probe.finished) reject(new Error('app-serverの承認判断者の応答がありません'));
       else resolve(output);
     });
   });
@@ -89,6 +96,8 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
   try {
     if (!statSync(state.target).isDirectory()) throw new Error('ディレクトリではありません');
     report.checks.push({ name, ok: true });
+    name = 'executeのモデル';
+    validateExecuteAssignment(state);
     if (state.kind === 'change') {
       name = 'OpenSpecルートの解決';
       const root = openSpecRoot(state).root;
@@ -125,29 +134,16 @@ export async function preflight(state, check = checkCommand, locate = resolveCod
       if (name === 'Claude認証' && typeof output === 'string' && !JSON.parse(output).loggedIn) throw new Error('Claudeが未認証');
       report.checks.push({ name, ok: true, ...(entry[2][0] === '--version' ? { path: entry[1], version: typeof output === 'string' ? output.trim() : null } : {}) });
     }
-    if (state.attemptAssignment && state.stage === 'execute') {
-      name = `${attemptAssignment(state).cli}の追加パスアクセス`;
-      await checkGrantAccess({ ...state, executables: { ...state.executables, ...report.executables } }, state.grants?.paths ?? [], check);
-      report.checks.push({ name, ok: true });
+    if (state.stage === 'execute' && !state.answers?.at(-1)?.inquiry) {
+      name = 'Codexの承認判断者';
+      const approval = codexApproval(state);
+      await check(codex, ['app-server', ...windowsSandboxArgs(), '-c', `approvals_reviewer="${approval.approvalsReviewer}"`],
+        state.target, undefined, { cwd: state.target, sandbox: 'workspace-write', ephemeral: true, ...approval });
+      report.checks.push({ name, ok: true, approvalsReviewer: approval.approvalsReviewer });
     }
-    if (state.attemptAssignment && gateRequired(state)) {
-      if (process.platform === 'win32') {
-        name = 'Git Bash';
-        const bash = resolveGitBash();
-        try {
-          await check(codex, ['sandbox', ...sandboxProfileArgs(state.target, writablePaths(state), Boolean(state.grants?.network)),
-            '--', bash, '-c', 'exit 0'], state.target, SANDBOX_TIMEOUT);
-        } catch (error) {
-          throw new Error(`${error.code ?? error.message}。${gitBashRecovery}`);
-        }
-        report.executables.bash = bash;
-        report.checks.push({ name, ok: true, path: bash });
-      }
-      name = 'Claudeの判断フック';
-      // UserPromptSubmitのblockはモデルを呼ばずにフックの読み込みを確かめられる。
-      const output = await check(report.executables.claude, ['-p', 'probe', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-        '--settings', probeSettings(), '--output-format', 'json', '--tools', 'Read'], state.target, 30_000);
-      if (typeof output === 'string' && !output.includes(PROBE_MARKER)) throw new Error('フックが動作しません');
+    if (state.stage === 'execute' && state.grants?.paths?.length && !state.answers?.at(-1)?.inquiry) {
+      name = 'Codexの追加パスアクセス';
+      await checkGrantAccess({ ...state, executables: { ...state.executables, ...report.executables } }, state.grants?.paths ?? [], check);
       report.checks.push({ name, ok: true });
     }
     report.ok = true;

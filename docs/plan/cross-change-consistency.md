@@ -2,7 +2,7 @@
 
 複数のOpenSpec Change（1 Phase＝10〜20 Change）の横断的な整合性レビューは、独立したskill **OpenSpec Phase Review**（`C:\products\openspec-phase-review`）として開発する。OSS調査、レビュー観点、Phase spine、出力スキーマ、出力ファイルの配置、評価方法はそちらの`docs/plan.md`にある。
 
-この文書は、Workflow Executor側でだけ必要な計画を扱う。
+この文書は、Workflow Executor側でだけ必要な計画を扱う。**未実装の開発計画であり、現行仕様ではない。**
 
 ## 1. 分担
 
@@ -65,7 +65,3 @@ skillのMVP（skillリポジトリ側）が先。実行器側はその後、次�
 
 - skillの配置場所の解決方法（実行器から見たskillのパス）。ユーザー用skillディレクトリのジャンクション経由か、設定で指定するか
 - Phaseの所属の受け渡し（skill側はspineのメンバー一覧を正とする）
-
-## 7. 本件と独立した注意点
-
-OpenSpec v2.0.0（2026-11-11）で`/opsx:*`コマンドが削除され、skillは`.agents/skills/`に集約された。このリポジトリには`.claude/commands/opsx`があり、開発用依存関係は`@fission-ai/openspec@1.10.0`に固定している。更新時は`openspec update --dry-run`で影響を確認する。

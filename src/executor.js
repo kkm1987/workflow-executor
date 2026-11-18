@@ -1,20 +1,19 @@
 import { spawn } from 'node:child_process';
-import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync, existsSync } from 'node:fs';
+import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope } from './workflow.js';
+import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope, executePermissions, escalationCounts } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { tokenMetrics, performanceReport } from './metrics.js';
-import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig } from './config.js';
-import { resolveCodex, spawnCommand, commandSpec, windowsSandboxArgs, sandboxProfileArgs, resolveGitBash } from './commands.js';
+import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig, codexApproval, AUTO_APPROVAL_REVIEWER } from './config.js';
+import { resolveCodex, spawnCommand, windowsSandboxArgs } from './commands.js';
 import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, writablePaths, taskGate } from './changes.js';
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
-import { codexSession, escalationDecision } from './codex-app-server.js';
+import { codexSession, escalationDecision, rejectApproval } from './codex-app-server.js';
 import { reviewCommand, codexReview, answerReviewPrompt, planItems } from './escalation.js';
-import { gateSettings, gateRequired } from './claude-gate.js';
 
 export const schemaPath = state => join(root, 'src', state.stage === 'prereview' ? 'prereview.schema.json' : 'result.schema.json');
 
@@ -32,11 +31,12 @@ export function resumeSession(state) {
     ['cli', 'model', 'effort'].every(key => session[key] === value[key]) ? session : null;
 }
 
-export function inputFor(state) {
-  if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now());
+export function inputFor(state, config) {
+  if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now(), config);
   const last = state.answers.at(-1);
   if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' + last.answer;
   const answer = (last.approval ? '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\n' : '') + last.answer;
+  if (state.stage === 'execute') return answer + '\n' + executePermissions(state, config);
   return state.stage === 'prereview'
     ? answer + '\n承認項目に使えるID（継続: retain、変更元: replace）\n' + JSON.stringify(approvalIds(state))
     : answer;
@@ -46,29 +46,30 @@ export function codexSandbox(state) {
   return !state.answers.at(-1)?.inquiry && ['execute', 'prereview'].includes(state.stage) ? 'workspace-write' : 'read-only';
 }
 
-export function codexThread(state) {
+export function codexThread(state, config) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
-  return { cwd: state.target, sandbox: codexSandbox(state), approvalPolicy: state.stage === 'execute' && !state.answers.at(-1)?.inquiry ? 'on-request' : 'never', approvalsReviewer: 'user',
+  return { cwd: state.target, sandbox: codexSandbox(state), ...codexApproval(state, config),
     ...(value.model ? { model: value.model } : {}), ...(session ? { threadId: session.sessionId } : {}) };
 }
 
 export { writablePaths };
 
-export function codexArgs(state) {
+export function codexArgs(state, config) {
   const value = attemptAssignment(state);
   const mode = codexSandbox(state);
   const paths = writablePaths(state);
+  const { approvalPolicy, approvalsReviewer } = codexApproval(state, config);
   return ['app-server',
     ...(value.model ? ['-c', `model=${JSON.stringify(value.model)}`] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
     ...windowsSandboxArgs(),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
-    '-c', `sandbox_mode="${mode}"`, '-c', `approval_policy="${codexThread(state).approvalPolicy}"`, '-c', 'approvals_reviewer="user"'];
+    '-c', `sandbox_mode="${mode}"`, '-c', `approval_policy="${approvalPolicy}"`, '-c', `approvals_reviewer="${approvalsReviewer}"`];
 }
 
-export function claudeArgs(state, sessionId, dir = '') {
+export function claudeArgs(state, sessionId) {
   const value = attemptAssignment(state);
   const session = resumeSession(state);
   const tools = ['Read', 'Glob', 'Grep'];
@@ -80,48 +81,33 @@ export function claudeArgs(state, sessionId, dir = '') {
       const path = `${openSpecRoot(state).root.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
       tools.push(`Edit(${path})`, `Write(${path})`);
     }
-  } else if (!inquiry && state.stage === 'execute') {
-    tools.push('Edit', 'Write', 'Bash');
-    if (state.grants?.network) tools.push('WebFetch', 'WebSearch');
   }
-  const granted = !inquiry && state.stage === 'execute' ? state.grants : null;
-  const paths = inquiry ? [] : [...(granted?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+  const paths = !inquiry && separateOpenSpec(state) ? changeDirectories(state) : [];
   return ['-p', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-    '--tools', inquiry ? 'Read,Glob,Grep' : `Read,Glob,Grep,Edit,Write,Bash${granted?.network ? ',WebFetch,WebSearch' : ''}`,
+    '--tools', inquiry ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
     ...(paths.length ? ['--add-dir', ...paths] : []),
     ...(value.model ? ['--model', value.model] : []), ...(value.effort ? ['--effort', value.effort] : []),
     '--output-format', 'stream-json', '--verbose', '--json-schema', readFileSync(schemaPath(state), 'utf8'),
     ...(session ? ['--resume', session.sessionId] : ['--session-id', sessionId]),
-    ...(gateRequired(state) ? ['--settings', gateSettings(join(dir, 'gate-context.json'))] : []),
     '--permission-mode', 'dontAsk', '--allowedTools', ...tools];
 }
 
 // 審査は工程の担当によらず常にCodexで行う。無効または起動できない場合はnullで所有者の判断へ戻す。
-function reviewer(state, dir, cli, command, prefix, signal) {
-  const setting = readConfig().escalationReview;
+function reviewer(state, dir, command, prefix, signal, { escalationReview: setting }) {
   if (!setting) return null;
   let count = 0;
-  const codex = cli === 'codex' ? { command, prefix } : { command: state.executables?.codex ?? resolveCodex(), prefix: [] };
   return input => {
     const path = join(dir, `review-${++count}.jsonl`);
-    return codexReview({ ...codex, cwd: state.target, setting, input, signal, log: line => appendFileSync(path, line) });
+    return codexReview({ command, prefix, cwd: state.target, setting, input, signal, log: line => appendFileSync(path, line) });
   };
 }
 
-function gateContext(state, dir) {
-  const [file, argv] = commandSpec(state.executables?.codex ?? resolveCodex(), ['sandbox', ...sandboxProfileArgs(state.target, writablePaths(state), Boolean(state.grants?.network))]);
-  const quote = value => `'${String(value).replaceAll('\\', '/').replaceAll("'", "'\\''")}'`;
-  return { state: { stage: state.stage, target: state.target, answers: state.answers.slice(-1), grants: state.grants ?? {}, approval: state.approval, tasks: state.tasks },
-    attempt: state.attempts, scope: attemptScope(state), writable: [state.target, ...writablePaths(state)], dir, review: readConfig().escalationReview,
-    codex: { command: state.executables?.codex ?? resolveCodex() },
-    sandbox: `${[file, ...argv].map(quote).join(' ')} -- ${quote(state.executables?.bash ?? resolveGitBash())} -c` };
-}
-
-async function invokeAgent(state, dir, command, prefix = []) {
+async function invokeAgent(state, dir, command, prefix, config) {
   const value = attemptAssignment(state);
   command ??= value.cli === 'codex' ? state.executables?.codex ?? resolveCodex() : state.executables?.claude ?? 'claude';
   const sessionId = value.cli === 'claude' ? resumeSession(state)?.sessionId ?? randomUUID() : null;
-  const input = inputFor(state);
+  const input = inputFor(state, config);
+  const isAutoReview = codexApproval(state, config).approvalsReviewer === AUTO_APPROVAL_REVIEWER;
   writeFileSync(join(dir, 'prompt.txt'), input);
   let stdout;
   let stderr;
@@ -153,8 +139,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
     stderr = openSync(join(dir, 'stderr.log'), 'w');
     if (value.cli === 'codex') rpc = openSync(join(dir, 'codex-rpc.jsonl'), 'w');
     await new Promise((resolve, reject) => {
-      if (gateRequired(state)) writeFileSync(join(dir, 'gate-context.json'), JSON.stringify(gateContext(state, dir)));
-      const args = value.cli === 'codex' ? codexArgs(state, dir) : claudeArgs(state, sessionId, dir);
+      const args = value.cli === 'codex' ? codexArgs(state, config) : claudeArgs(state, sessionId);
       const child = spawnCommand(command, [...prefix, ...args], {
         cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true,
       });
@@ -184,10 +169,11 @@ async function invokeAgent(state, dir, command, prefix = []) {
       };
       const fail = error => { failure ??= error; kill(); };
       if (value.cli === 'codex') session = codexSession(child, {
-        thread: codexThread(state),
+        thread: codexThread(state, config),
         approval: (method, params) => {
-          const choice = escalationDecision(state, method, params);
+          const choice = isAutoReview ? rejectApproval(method) : escalationDecision(state, method, params);
           if (!choice) return null;
+          if (isAutoReview) choice.basis = '自動レビューの設定中に実行器へ届いた要求';
           const entry = { time: new Date().toISOString(), attempt: state.attempts, ...attemptScope(state), cli: 'codex', kind: method,
             command: params.command ?? null, commandActions: params.commandActions ?? [], reason: params.reason ?? null, cwd: params.cwd ?? null };
           recordEscalation('escalation_requested', entry);
@@ -195,10 +181,23 @@ async function invokeAgent(state, dir, command, prefix = []) {
             Object.assign(entry, { decidedAt: new Date().toISOString(), decision: final.decision, basis: final.basis, layer: final.layer, ...(final.review ? { review: final.review } : {}) });
             addEscalation(entry);
             recordEscalation('escalation_decided', entry);
-            return Object.hasOwn(choice.result, 'decision') ? { decision: final.decision } : choice.result;
+            return final === choice ? choice.result : { decision: final.decision };
           };
           if (!choice.reviewRequest) return decided(choice);
-          return reviewCommand(state, choice, reviewer(state, dir, value.cli, command, prefix, reviews.signal), params.reason).then(decided);
+          return reviewCommand(state, choice, reviewer(state, dir, command, prefix, reviews.signal, config), params.reason).then(decided);
+        },
+        autoReview: ({ reviewId, review, action, startedAtMs, completedAtMs, decisionSource }) => {
+          if (!isAutoReview || !['approved', 'denied', 'timedOut', 'aborted'].includes(review?.status)) return;
+          const now = new Date().toISOString();
+          const entry = { time: Number.isFinite(startedAtMs) ? new Date(startedAtMs).toISOString() : now,
+            decidedAt: Number.isFinite(completedAtMs) ? new Date(completedAtMs).toISOString() : now,
+            attempt: state.attempts, ...attemptScope(state), cli: 'codex', kind: action?.type ?? 'autoApprovalReview',
+            command: action?.command ?? (action?.type === 'execve' ? JSON.stringify(action.argv) : null),
+            reason: action?.reason ?? null, cwd: action?.cwd ?? null,
+            decision: review.status === 'approved' ? 'accept' : 'decline', basis: review.rationale ?? null,
+            layer: 'autoReview', reviewId: reviewId ?? null, review, decisionSource: decisionSource ?? null };
+          addEscalation(entry);
+          recordEscalation('escalation_decided', entry);
         },
         turn: { input: [{ type: 'text', text: input }], outputSchema: JSON.parse(readFileSync(schemaPath(state), 'utf8')),
           ...(value.effort ? { effort: value.effort } : {}) },
@@ -240,16 +239,6 @@ async function invokeAgent(state, dir, command, prefix = []) {
       if (handle !== undefined) { try { closeSync(handle); } catch (error) { failure ??= error; } }
     }
   }
-  // フックは別プロセスなので判断を試行のファイルへ書き、ここで証拠へ取り込む。
-  if (existsSync(join(dir, 'gate.jsonl'))) {
-    for (const line of readFileSync(join(dir, 'gate.jsonl'), 'utf8').split('\n').filter(Boolean)) {
-      const entry = JSON.parse(line);
-      const { decidedAt, decision, basis, layer, review, ...requested } = entry;
-      recordEscalation('escalation_requested', requested);
-      addEscalation(entry);
-      recordEscalation('escalation_decided', entry);
-    }
-  }
   let result;
   try {
     if (value.cli === 'claude') {
@@ -277,7 +266,7 @@ async function invokeAgent(state, dir, command, prefix = []) {
   return result;
 }
 
-export async function runAgent(state, dir, command, prefix = []) {
+export async function runAgent(state, dir, command, prefix = [], config = readConfig()) {
   let evidence;
   let before;
   let specBefore;
@@ -295,7 +284,7 @@ export async function runAgent(state, dir, command, prefix = []) {
   }
   let result;
   let failure;
-  try { result = await invokeAgent(state, dir, command, prefix); }
+  try { result = await invokeAgent(state, dir, command, prefix, config); }
   catch (error) { failure = error; }
   finally {
     if (evidence) {
@@ -354,7 +343,7 @@ export async function step(state, runner = runCodex, base = dataRoot, check = pr
   if (state.status !== 'ready') throw new Error(`実行できない状態です: ${state.status}`);
   delete state.attemptAssignment;
   if (!await prepare(state, base, check)) return state;
-  return executeStep(state, runner, base, limits, validate, check, new Set(), review);
+  return executeStep(state, runner, base, limits, validate, check, new Set(state.stage === 'execute' ? ['execute:codex'] : []), review);
 }
 
 // 回答を根拠とする変更だけを審査する。それ以外と審査の不調は承認待ちになる。
@@ -391,7 +380,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   }
   let config;
   delete state.attemptAssignment;
-  try { config = readConfig(); validateAssignments(state, config); }
+  try { config = readConfig(); validateAssignments(state, config, { stored: true }); }
   catch (error) {
     state.status = 'failed'; state.error = error.message;
     event(state, 'failed', error.message, base); save(state, base); return state;
@@ -431,7 +420,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   }
   state.attemptAssignment = value;
   const checkKey = `${state.stage}:${value.cli}`;
-  if ((value === fallback || (state.stage === 'execute' && (state.grants?.paths?.length || value.cli === 'claude'))) && !checked.has(checkKey)) {
+  if ((value === fallback || state.stage === 'execute') && !checked.has(checkKey)) {
     if (!await prepare(state, base, check)) { delete state.attemptAssignment; save(state, base); return state; }
     checked.add(checkKey);
   }
@@ -439,6 +428,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
   if (!resumeSession(state)) delete state.session;
   const resumed = Boolean(resumeSession(state));
   const metric = { attempt: state.attempts + 1, stage: state.stage, ...value, resumed,
+    executeApprovalReviewer: state.stage === 'execute' && !inquiry ? config.executeApprovalReviewer : null,
     sessionId: state.session?.sessionId ?? null, beforeLimits, startedAt: state.inputAt,
     selection, externalEvidence: evidenceSelection(state, Date.parse(state.inputAt)) };
   const started = performance.now();
@@ -452,7 +442,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     startedAt: state.inputAt };
   state.activity = null;
   writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ ...value, work: state.work, activity: null }, null, 2));
-  writeFileSync(join(dir, 'prompt.txt'), inputFor(state));
+  writeFileSync(join(dir, 'prompt.txt'), inputFor(state, config));
   save(state, base);
   event(state, 'started', { stage: state.stage, attempt: state.attempts }, base);
   let heartbeatError;
@@ -464,7 +454,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     }
   }, 10_000);
   try {
-    let result = await runner(state, dir);
+    let result = await (runner === runCodex ? runner(state, dir, undefined, [], config) : runner(state, dir));
     if (heartbeatError) throw heartbeatError;
     writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2));
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
@@ -523,6 +513,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     metric.status = state.status;
     metric.error = ['failed', 'limited'].includes(state.status) ? state.error : null;
     Object.assign(metric, tokenMetrics(dir, value.cli));
+    metric.escalationCounts = escalationCounts(metric.escalations);
     state.metrics ??= [];
     state.metrics.push(metric);
     writeFileSync(join(dir, 'metrics.json'), JSON.stringify(metric, null, 2));
@@ -546,7 +537,7 @@ export async function run(state, runner = runCodex, base = dataRoot, onProgress 
   if (state.status !== 'ready') return state;
   delete state.attemptAssignment;
   if (!await prepare(state, base, check)) { onProgress(state); return state; }
-  const checked = new Set();
+  const checked = new Set(state.stage === 'execute' ? ['execute:codex'] : []);
   while (state.status === 'ready') {
     await executeStep(state, runner, base, limits, validate, check, checked);
     onProgress(state);

@@ -5,6 +5,16 @@ import { fileURLToPath } from 'node:url';
 export const stagesFor = kind => kind === 'change'
   ? ['prereview', 'execute', 'review', 'acceptance'] : ['plan', 'execute', 'review', 'acceptance'];
 
+export const AUTO_APPROVAL_REVIEWER = 'auto_review';
+
+export function codexApproval(state, config) {
+  const execute = state.stage === 'execute' && !state.answers?.at(-1)?.inquiry;
+  return {
+    approvalPolicy: execute ? 'on-request' : 'never',
+    approvalsReviewer: execute && (config ?? readConfig()).executeApprovalReviewer === 'auto-review' ? AUTO_APPROVAL_REVIEWER : 'user',
+  };
+}
+
 export function validateModel(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('モデルの指定が不正です');
   const { model = null, effort = null } = value;
@@ -18,6 +28,8 @@ export function validateModel(value) {
 
 export function readConfig(path = new URL('../workflow.config.json', import.meta.url)) {
   const config = JSON.parse(readFileSync(path, 'utf8'));
+  if (config.executeApprovalReviewer === undefined) config.executeApprovalReviewer = 'auto-review';
+  if (!['auto-review', 'executor'].includes(config.executeApprovalReviewer)) throw new Error('executeApprovalReviewerの指定が不正です');
   const localPath = join(dirname(path instanceof URL ? fileURLToPath(path) : path), 'workflow.config.local.json');
   let local;
   try {
@@ -33,6 +45,7 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
   }
   for (const kind of ['request', 'change']) {
     for (const stage of stagesFor(kind)) validateModel(config.models?.[kind]?.[stage]);
+    validateExecuteAssignment({ kind }, config);
   }
   if (config.fallbacks !== undefined) {
     if (!config.fallbacks || typeof config.fallbacks !== 'object' || Array.isArray(config.fallbacks)) throw new Error('fallbacksの指定が不正です');
@@ -74,6 +87,7 @@ export function assignment(state, config = readConfig()) {
 }
 
 export function fallbackAssignment(state, config = readConfig()) {
+  if (state.stage === 'execute') return null;
   const values = state.fallbacks ?? {};
   const value = Object.hasOwn(values, state.stage) ? values[state.stage] : config.fallbacks?.[state.kind ?? 'request']?.[state.stage];
   if (value === undefined || value === null) return null;
@@ -83,12 +97,21 @@ export function fallbackAssignment(state, config = readConfig()) {
   return result;
 }
 
-export function validateAssignments(state, config = readConfig()) {
+export function validateExecuteAssignment(state, config = readConfig()) {
+  if (assignment({ ...state, stage: 'execute' }, config).cli !== 'codex') {
+    const recovery = state.id ? `。model ${state.id} execute <Codexのモデル> で変更してください` : '';
+    throw new Error(`executeにはCodexモデルが必要です${recovery}`);
+  }
+}
+
+export function validateAssignments(state, config = readConfig(), { stored = false } = {}) {
   for (const values of [state.models, state.fallbacks]) {
     if (values === undefined) continue;
     if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('工程別設定が不正です');
     for (const stage of Object.keys(values)) if (!stagesFor(state.kind).includes(stage)) throw new Error('工程が不正です');
   }
+  validateExecuteAssignment(state, config);
+  if (!stored && Object.hasOwn(state.fallbacks ?? {}, 'execute')) throw new Error('executeに代替モデルは指定できません');
   for (const stage of stagesFor(state.kind)) {
     assignment({ ...state, stage }, config);
     fallbackAssignment({ ...state, stage }, config);

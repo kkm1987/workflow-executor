@@ -41,7 +41,7 @@ test('Windowsの全起動経路はelevatedを要求し、他の環境には設�
         state.grants = { paths: [base], network: true };
         for (const resumed of [false, true]) {
           state.session = resumed ? { stage, ...assignment(state), sessionId: 'old' } : undefined;
-          const args = codexArgs(state, base);
+          const args = codexArgs(state);
           verify(args);
           assert.equal(Boolean(codexThread(state).threadId), resumed);
           assert.ok(args.includes(`approval_policy="${stage === 'execute' ? 'on-request' : 'never'}"`));
@@ -121,8 +121,15 @@ test('既定割り当てと固定値を検証し、不正なCLI・モデル・�
     assert.throws(() => validateModel(value));
   }
   const config = readConfig();
-  config.limits.execute.primary = -1;
   const file = join(dir, 'config.json');
+  delete config.executeApprovalReviewer;
+  writeFileSync(file, JSON.stringify(config));
+  assert.equal(readConfig(file).executeApprovalReviewer, 'auto-review');
+  for (const value of [null, 'user', 'auto_review']) {
+    writeFileSync(file, JSON.stringify({ ...config, executeApprovalReviewer: value }));
+    assert.throws(() => readConfig(file), /executeApprovalReviewer/);
+  }
+  config.limits.execute.primary = -1;
   writeFileSync(file, JSON.stringify(config));
   assert.throws(() => readConfig(file), /固定値/);
 });
@@ -133,10 +140,10 @@ test('開始時と途中の上書きを保存し、変更は次の割り当て�
     async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 2, completedTasks: 0 }] }));
   state.stage = 'execute';
   const previous = assignment(state);
-  setModel(state, 'execute', 'claude-opus-5-5', 'low', base);
+  setModel(state, 'execute', 'gpt-6.1-sol', 'low', base);
   assert.equal(previous.cli, 'codex');
-  assert.equal(assignment(load(state.id, base)).cli, 'claude');
-  assert.throws(() => setModel(state, 'execute', 'claude-opus-5-5', 'ultra', base));
+  assert.equal(assignment(load(state.id, base)).model, 'gpt-6.1-sol');
+  assert.throws(() => setModel(state, 'execute', 'claude-opus-5-5', 'low', base), /executeにはCodex/);
   assert.equal(assignment(load(state.id, base)).effort, 'low');
 });
 
@@ -183,12 +190,12 @@ test('Codexの新規と再開引数は割り当てと読み取り専用を保持
   const state = create(target, '試験', base);
   state.stage = 'review';
   setModel(state, 'review', 'gpt-6-luna', 'high', base);
-  let args = codexArgs(state, base);
+  let args = codexArgs(state);
   assert.ok(!args.includes('--ephemeral'));
   assert.equal(codexThread(state).model, 'gpt-6-luna');
   assert.ok(args.includes('model_reasoning_effort="high"'));
   state.session = { stage: 'review', ...assignment(state), sessionId: 'thread-1' };
-  args = codexArgs(state, base);
+  args = codexArgs(state);
   assert.equal(args[0], 'app-server');
   assert.equal(codexThread(state).threadId, 'thread-1');
   assert.ok(args.includes('sandbox_mode="read-only"'));
@@ -293,7 +300,7 @@ test('承認計画への回答は同じ担当のセッションへ説明・回�
     const saved = structuredClone(state.session);
     const expected = '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\nVMは使用しない\n承認項目に使えるID（継続: retain、変更元: replace）\n{"retain":[],"replace":["A1"]}';
     assert.equal(inputFor(state), expected);
-    const args = () => assignment(state).cli === 'codex' ? codexArgs(state, base) : claudeArgs(state, '新規');
+    const args = () => assignment(state).cli === 'codex' ? codexArgs(state) : claudeArgs(state, '新規');
     const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';
     assert.equal(assignment(state).cli === 'codex' ? codexThread(state).threadId : args()[args().indexOf(resumeFlag) + 1], saved.sessionId);
     for (const changed of [

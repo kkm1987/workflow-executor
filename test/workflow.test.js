@@ -31,6 +31,45 @@ function fixture(t) {
   return { base, target, state: create(target, '入力を検証して保存する', base) };
 }
 const task = { title: '入力検証', acceptance: '空の入力は保存されない' };
+
+test('executeは判断者に合った指示を受け、所有者の許可を再開時も自動レビューへ伝える', async t => {
+  const { state, base } = fixture(t);
+  state.stage = 'execute';
+  const command = 'Write-Output test';
+  advance(state, { ...ok(), outcome: 'permission', question: 'コマンド実行が必要', permission: { commands: [command] } });
+  const value = attemptAssignment(state);
+  state.session = { ...value, stage: 'execute', sessionId: 'old' };
+  await grant(state, { commands: [command] }, base);
+  assert.match(state.answers.at(-1).answer, /所有者が明示的に許可しました/);
+  const automatic = prompt(state, Date.now(), { executeApprovalReviewer: 'auto-review' });
+  assert.match(automatic, /その場で昇格を要求/);
+  assert.match(automatic, /自動レビューが拒否した場合に限り.*outcome=permission/);
+  assert.ok(automatic.includes(`所有者が明示的に許可したコマンドを示す。["${command}"]`));
+  assert.match(inputFor(state), /所有者が明示的に許可したコマンド/);
+  const legacy = prompt(state, Date.now(), { executeApprovalReviewer: 'executor' });
+  assert.match(legacy, /パイプは全文一致/);
+  assert.doesNotMatch(legacy, /自動レビューに判断させる/);
+});
+
+test('試行の計測と詳細表示に自動レビューの通知件数または未取得を出す', async t => {
+  for (const expected of [null, 1]) {
+    const { state, base } = fixture(t);
+    state.stage = 'execute';
+    state.tasks = [{ ...task, status: 'pending' }];
+    await step(state, async (current, dir) => {
+      if (expected) {
+        const escalations = [{ layer: 'autoReview', decision: 'accept' }];
+        current.evidence = [{ attempt: current.attempts, escalations }];
+        writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ escalations }));
+      }
+      return ok();
+    }, base);
+    const metric = JSON.parse(readFileSync(join(base, state.id, 'attempt-0001', 'metrics.json'), 'utf8'));
+    assert.equal(metric.executeApprovalReviewer, 'auto-review');
+    assert.equal(metric.escalationCounts.autoReview, expected);
+    assert.equal(summary(state, base, true).escalationCounts.autoReview, expected);
+  }
+});
 const decisions = { requirements: '要求と受け入れ条件を確認', granularity: '独立検証できる最小単位', architecture: '既存の標準機能で実装' };
 const ok = (tasks = []) => ({ report, returnTo: 'none', outcome: 'ok', cause: '', summary: '確認済み', question: '', decisions, tasks });
 const revise = { report, returnTo: 'prereview', outcome: 'revise', cause: '', summary: '空入力が保存されるため修正が必要', question: '', tasks: [] };
@@ -258,9 +297,9 @@ for (const outcome of ['ok', 'partial', 'revise', 'approval', 'question', 'permi
     assert.equal(view.inquiry.question, '理由は？');
     assert.equal(brief(view).inquiry.reply, '別の説明');
     answer(state, '通常の回答', base);
-    assert.equal(inputFor(state), '通常の回答');
+    assert.match(inputFor(state), /^通常の回答\n.*自動レビュー/);
     assert.equal(codexThread(state).threadId, '保存セッション');
-    assert.ok(codexArgs(state, base).includes('sandbox_mode="workspace-write"'));
+    assert.ok(codexArgs(state).includes('sandbox_mode="workspace-write"'));
   });
 }
 
@@ -272,7 +311,7 @@ for (const stage of ['execute', 'prereview']) {
     assert.equal(summary(state, base).inquiry, undefined);
     for (const resumed of [false, true]) {
       if (resumed) state.session = { stage, ...attemptAssignment(state), sessionId: '保存セッション' };
-      const codex = codexArgs(state, base);
+      const codex = codexArgs(state);
       assert.ok(codex.includes('sandbox_mode="read-only"'));
       assert.ok(!codex.some(arg => /writable_roots|network_access/.test(arg)));
       const claude = claudeArgs(state, '新規');
@@ -928,11 +967,11 @@ test('検査失敗・タイムアウトはモデル0回で停止し、再開時�
   const check = async () => { checks++; return { ok: true }; };
   await checkedRun(state, async current => ok(current.stage === 'plan' ? [task] : []), base, undefined, check);
   assert.equal(state.status, 'completed');
-  assert.equal(checks, 1);
+  assert.equal(checks, 2);
   state.status = 'ready';
   state.stage = 'plan';
   await checkedStep(state, runner, base, check);
-  assert.equal(checks, 2);
+  assert.equal(checks, 3);
 });
 
 test('全工程が独立して進み、レビュー後だけタスクが完了する', async t => {
@@ -1015,8 +1054,8 @@ test('権限要求は回答待ちになり、許可は保存されて次の実�
   await assert.rejects(grant(state, { paths: [homedir()] }, base, passed), /許可できない/);
   await grant(state, { network: true, paths: [outside] }, base, passed);
   assert.equal(state.status, 'ready');
-  assert.ok(codexArgs(state, base).includes('sandbox_workspace_write.network_access=true'));
-  assert.ok(codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
+  assert.ok(codexArgs(state).includes('sandbox_workspace_write.network_access=true'));
+  assert.ok(codexArgs(state).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
   assert.throws(() => validateResult({ report, returnTo: 'none', outcome: 'permission', cause: '', summary: 'x', question: 'y', permission: { network: false, paths: [] }, tasks: [] }, 'execute'), /権限要求/);
 });
 
@@ -1068,9 +1107,6 @@ test('許可の確認はCodexの実装用設定を使い、Claudeは直接読み
   } else assert.ok(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`));
   assert.ok(args.at(-1).includes('readdirSync'));
   await assert.rejects(checkGrantAccess(state, [target], async () => { throw new Error('secret'); }), error => error.message.includes(target) && !error.message.includes('secret'));
-  state.models = { execute: { model: 'claude-opus-5-5' } };
-  await checkGrantAccess(state, [target], async () => { assert.fail('Claudeでは起動しない'); });
-  await assert.rejects(checkGrantAccess(state, [join(target, 'missing')]), /OSのアクセス権/);
   state.stage = 'execute';
   advance(state, { report, returnTo: 'none', outcome: 'permission', cause: '', summary: '遮断', question: 'ネットワークが必要', permission: { network: true, paths: [] }, tasks: [] });
   await grant(state, { network: true }, base, async () => { assert.fail('パスなしでは確認しない'); });
@@ -1102,7 +1138,7 @@ test('実装のみ書き込み可能で、質問セッションがなければ�
   const { state, base } = fixture(t);
   for (const stage of ['plan', 'execute', 'review', 'acceptance']) {
     state.stage = stage;
-    const args = codexArgs(state, base);
+    const args = codexArgs(state);
     assert.equal(args[0], 'app-server');
     assert.equal(codexThread(state).sandbox, stage === 'execute' ? 'workspace-write' : 'read-only');
     assert.ok(!args.includes('--ephemeral'));

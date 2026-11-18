@@ -1,12 +1,19 @@
 # Workflow Executor
 
-ローカルの開発対象で自由記述の要求またはOpenSpec changeを実行する。changeは選定・実行前レビュー→タスク群ごとのapply・独立レビュー→最終確認→同期・アーカイブ、自由記述は計画（要求整理・粒度判定・設計判定）から始める。工程間は別コンテキスト、質問への回答後は同じ工程のセッションを再開する。[docs/MVP.md](docs/MVP.md)を参照。
+ローカルの開発対象（リポジトリ・worktree）で、自由記述の要求またはOpenSpec changeを、Codex・Claudeのエージェントに工程ごとに別コンテキストで実行させる実行器。普段の開発で使うチャットからskillを呼び出して使う。
 
-## 起動
+- **OpenSpec change**: 選定・実行前レビュー → タスク群ごとの実装・独立レビュー → 最終確認 → 同期・アーカイブ
+- **自由記述の要求**: 計画（要求整理・粒度判定・設計判定）→ タスクごとの実装・独立レビュー → 最終確認
 
-Node.js 22以上と認証済みCodex CLI、Claudeを割り当てる場合は認証済みClaude Code CLIが必要。Codexの新規実行・セッション再開は`codex app-server`のstdio JSON-RPCを使い、承認方針はexecuteだけ`on-request`、他の工程と確認の質問は`never`、承認要求の送信先は`user`に固定する。利用者設定の自動レビューには委ねない。実行器はNode.js標準機能で動作する。OpenSpecは開発用依存関係として固定し、環境の再構築時は`npm ci`で導入する。開発対象のcwdで実行器同梱のOpenSpecを起動する。
+エージェントからの質問・権限要求・承認はチャットに提示され、回答後は同じ工程のセッションを再開する。独立レビューを通ったタスクだけが完了扱いになる。自動コミット・公開は行わない。
 
-### クローン後のセットアップ
+## 必要なもの
+
+- Node.js 22以上
+- 認証済みのCodex CLI（executeは常にCodexで実行する）
+- Claudeを割り当てる工程がある場合は、認証済みのClaude Code CLI（既定ではplan・prereviewがClaude）
+
+## セットアップ
 
 ```powershell
 git clone <リポジトリURL>
@@ -14,190 +21,48 @@ cd workflow-executor
 npm ci
 ```
 
-Node.js 22以上を用意し、Codex CLIへログインする。Claudeを割り当てる場合はClaude Code CLIにもログインする。Windowsで別のリポジトリやworktreeから使う場合は、ユーザー用skillを登録する。
+別のリポジトリやworktreeから使うため、ユーザー用skillディレクトリへリンクを登録する（Windows）。
 
 ```powershell
 .\scripts\register-skill.ps1
 ```
 
-登録後はCodexで`$workflow-executor`、Claude Codeで`/workflow-executor`を呼び出す。skillを使わずCLIから開始する場合は、実行器のルートで次のように実行する（`<対象リポジトリ>`は開発対象の絶対パス）。
+## 使い方
+
+開発対象を開いたチャットからskillを呼び出す。
+
+- Codex: `$workflow-executor`
+- Claude Code: `/workflow-executor`
+
+引数なしで呼ぶと、OpenSpecの次に実行すべきchangeの選定から始める。change名や自由記述の要求を指定して開始することもできる。以降の質問への回答・承認・状態確認もチャットで普通の文章で行い、CLIの操作はskillが行う。
+
+CLIを直接使う場合は、実行器のルートで次のように実行する（[CLIリファレンス](docs/spec/cli.md)）。
 
 ```powershell
-node src/cli.js start <対象リポジトリ> agent-docs\request.md
-node src/cli.js run <ID>
-```
-
-OpenSpec changeを指定して開始する場合は`start-change <対象リポジトリ> [change名] [--store <id>]`を使う。storeを省略すると、OpenSpecが対象から最寄りの`openspec/`、その`store:`宣言、グローバルの既定storeの順で解決する。開始時のルートとstoreを保存し、以降の検証・アーカイブでも固定して使う。ルートはGitの作業ツリーである必要がある。以降のCLI操作例は下記を参照。
-
-この作業環境では、このリポジトリ内とCodex・Claude Codeのユーザー用skillディレクトリに登録済み。普段の開発対象を開いたチャットからskillを引数なしで呼ぶと、OpenSpecの次に実行すべきchangeの選定から開始する。change名や自由記述の要求を指定して開始することもできる。
-
-Windowsでは`./scripts/register-skill.ps1`でユーザー用skillディレクトリにリンクし、別のリポジトリ・worktreeからも使えるようにする。Codexでは`$workflow-executor`、Claude Codeでは`/workflow-executor`で呼ぶ。必要なら`-Client codex`または`-Client claude`で登録先を選べる。既存の同名skillは上書きしない。実行器を移動する場合は登録先のリンクを見直す。
-
-skillは実行器との相対位置を使うため、コピーではなく元フォルダーへのリンクを使う。CodexでもClaude Codeでも同じ実行器を操作する。
-
-手動操作の例（このリポジトリを作業ディレクトリとする）：
-
-```powershell
-node src/cli.js start C:\path\to\target agent-docs\request.md
+node src/cli.js start-change C:\path\to\target [change名]
 node src/cli.js run <ID>
 node src/cli.js status <ID>
-node src/cli.js answer <ID> agent-docs\answer.md
-node src/cli.js start-change C:\path\to\target [change名]
-node src/cli.js start-change C:\path\to\target sample-change --model review gpt-6.1-sol high
-node src/cli.js model <ID> execute gpt-6-luna high
-node src/cli.js archive <ID>
 ```
 
-普段は開発対象のチャットからskillを呼び、要求と質問への回答を普通の文章で伝える。CLI操作はskillが行う。`run`は回答待ち・利用枠不足・失敗・完了まで進め、`step`は調査用に1工程だけ実行する。`status`は状態・必要な対応・現在の試行・最新活動・直近の工程報告の短い要約を返す。試行別履歴や外部証拠の詳細は`status <ID> --detail`で取得する。IDを省略すると保存済みワークフローを一覧で確認できる。
+## 設定
 
-`workflow.config.json`に工程の既定モデル・推論レベルと利用枠の固定値を置く。changeの既定値はprereview=`claude-opus-5-5`/medium、execute=`gpt-6.1-sol`/low、review・acceptance=`gpt-6-luna`/high。requestは未指定でCLIの既存設定を使う。`model`または開始時の`--model`は`state.models`へ保存され、次の試行から既定値に優先する。モデル名が`claude-`で始まればClaude、それ以外はCodex。推論レベルはCLIごとに検証し、モデル固有の非対応値はCLIエラーになる。
+- `workflow.config.json`: 工程ごとの既定モデル・代替モデル・利用枠の閾値・executeの昇格の判断者（[モデルと利用枠](docs/spec/models-and-limits.md)、[権限と承認](docs/spec/permissions.md)）
+- `workflow.config.local.json`（Git管理外）: ダッシュボードのArtifact公開先（[Artifact公開](docs/spec/dashboard-artifact.md)）
 
-WindowsのCodex実行ファイルは`%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`の更新日時が最新のもの、次に`PATH`の`codex`を探す。解決したパスをpreflight・本実行・利用枠取得で共有し、パスと版をpreflight記録へ残す。Claudeを使う工程があるときだけClaudeの起動・認証も確認する。
+ワークフローの状態とログは`data/`、要求・回答などの入力ファイルは`agent-docs/`に置く（どちらもGit管理外）。開発対象には保存しない。
 
-Windowsでは新規実行・resume・両プロファイルの実行前確認・grant確認に`features.prefer_mxc=false`と`windows.sandbox=elevated`を指定する。ユーザー設定は変更せず、既存の読み書き・ネットワーク制限と管理ポリシーを維持する。grant確認は呼び出し単位の`workflow-grant`プロファイルで`:workspace`を継承し、追加パスと別ストアの対象changeをworkspace_rootsへ反映する。管理ポリシーで許可プロファイルを限定している場合は、端末管理者による同プロファイルの許可が必要。端末管理者が事前にelevatedの初期セットアップと対象・追加パス・別OpenSpecストアのアクセス権を準備し、失敗時のセットアップ・ACL・管理ポリシーも復旧する。自動昇格や別方式への自動切り替えは行わない。preflightの`requestedWindowsSandbox: "elevated"`は要求値であり、適用確認済みを意味しない。
+## テスト
 
-Windowsでは起動時に`CODEX_WINDOWS_REGISTERED_CORE`と`CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY`を除去し、Codexアプリ専用の起動環境を子へ継承しない。`registered Core`の失敗はこの起動環境の継承が原因であり、管理者による初期セットアップでは解決しない。失敗時は実行器が更新済みか、起動したCodexのパス・版、preflightの固定原因文、sandboxログのrunner経路（`using copied command-runner`）を確認する。生の診断はpreflight記録へ保存しない。
-
-MXC利用時の停止中案件を移行する際は、実行器と子プロセスの停止および対象の途中の差分を確認する。`failed`／中断済み`running`／`limited`は`node src/cli.js retry <ID>`で旧セッションを破棄する。`waiting`／`ready`は`status`で現在の工程・有効なモデル・推論レベルを確認し、`node src/cli.js model <ID> <現在の工程> <同じモデル> [同じ推論レベル]`で同値を再設定する。同値でも当該工程のセッションを破棄し、質問・許可要求・承認待ちは保持する。必要な`answer`／`grant`／`approve`後に`run`で実行前確認をやり直す。状態JSONや完了済み履歴は直接変更しない。移行前に通常ホストの隔離fixtureで起動・権限境界・編集ツールとシェルの書き込み・回答後のresumeを実測し、成功を確認する。失敗時は運用を停止して原因を復旧する。限定した実測の成功は長期安定性を保証しない。
-
-`run/step`はモデル呼び出し前に、対象ディレクトリ、Git作業ツリー、CLI起動・認証、読み取り用・書き込み用サンドボックスの起動を確認する。制限時間は、サンドボックスを起動する確認（読み取り用・書き込み用・追加パス・Git Bash）が120秒、それ以外が15秒。対象コードは実行・変更せず、認証コマンドの出力も保存しない。同じ`run`内では1回、別の再開操作では再確認する。結果は`data/<ID>/preflight-*.json`に残り、失敗時はモデルを呼ばず`failed`になる。Windowsでチャットの制限内から別のサンドボックスを起動できない場合は、開発主体が実行環境を確認する。実行器は自動昇格しない。
-
-実行前確認の`execpolicyRules`は、`$CODEX_HOME/rules`（未指定なら`~/.codex/rules`）と対象の`.codex/rules`にある`decision="allow"`の行を`path`・`count`で記録する。読み取り失敗は`error`に残し、規則の存在・読み取り失敗だけでは実行を止めない。最新の記録は`status <ID> --detail`でも確認できる。規則は変更しない。規則による承認省略の有無を保証する記録ではなく、承認要求なしの実行に影響し得る設定を確認する手掛かりである。
-
-## 状態と復旧
-
-executeの昇格要求は次の順に判断する。`;`・`&&`・改行、ファイル変更、追加権限は従来どおり許可しない。
-
-1. 決定的な判定: 全文一致の許可があれば許可する。`git push`を含むコマンド・スクリプトは所有者へ回す。`git fetch`・`ls-remote`・`diff`・`status`・`log`・`show`・`rev-parse`の安全な形は自動で許可する（`.git`への書き込み許可がある案件を除く）。
-2. 計画審査: 承認済みで`gate=plan`の項目があれば、Codexの読み取り専用の別スレッドが項目とコマンド・スクリプトの中身を照合する。実行器は項目・リスク・審査前後の内容を検証し、固定済みの項目では実行するスクリプトの実パスとSHA-256も照合する。未固定の項目はスクリプトの内容を都度審査する。費用の確認方法が書かれていても上限を確認できない場合は所有者に回す。許可は今回1回に限る。結果は保存しない。失敗・タイムアウト・判断不能は所有者へ回す。`workflow.config.json`の`escalationReview`でモデルを指定し、`null`で無効にできる。担当によらず常にCodexで行う。
-3. 所有者: 拒否して権限要求を返す。
-
-Claudeのexecuteも同じ制約で動く。`PreToolUse`フックが`Bash`を`codex sandbox`で包み、先頭行が`# workflow-escalate: <理由>`の場合だけ2行目を同じ順に判断する。`Edit`・`Write`は対象・許可パス・changeディレクトリの外と`.git`への書き込みを拒否する。フックが動作しない場合は実行前確認で`failed`になる。
-
-Windowsでは、`CLAUDE_CODE_GIT_BASH_PATH`、`PATH`上の`bash.exe`（System32とWindowsAppsを除く）、`PATH`上の`git.exe`から求めたGitの導入先の`bin\bash.exe`の順にGit Bashを探す。Claudeの判断フックが必要な試行では、実行前確認でGit Bashがサンドボックス内で起動できることを確かめ、記録したパスをフックでも使う。
-
-決定的な判定と計画審査で許可されないと、エージェントは`outcome=permission`で必要なコマンドを`permission.commands`に返して停止する。所有者は理由・影響と全文を確認し、`node src/cli.js grant <ID> --command "Get-CimInstance Win32_Processor"`で要求されたコマンドだけを許可する（`--command`は複数指定可）。その後`run <ID>`で同じセッションを再開し、同じコマンドを再実行する。ネットワーク・書き込みパスは従来どおり`--network`・`--path`で管理する。
-
-許可は案件内の`grants.commands`へ保存され、executeの要求1回ごとに空白だけを正規化して全文比較する。対象内のスクリプトを実行するコマンドは`grants.commandHashes`で許可時の内容に束縛し、内容が変わると全文一致を使わない。ハッシュのない旧許可は従来どおり有効である。権限要求の`permission.scripts`にスクリプトのハッシュと先頭部分を示す。接頭辞一致・セッション一括許可・恒久規則の追加は使わない。`;`・`&&`・改行は引用符内でも一律拒否し、パイプは全文一致の場合だけ許可する。ファイル変更と追加権限は昇格では許可せず、MCP・対話入力は取り消す。ネットワークの文脈がある要求は`grants.network`で判断する。旧状態に`grants.commands`がなければコマンド昇格の許可なしとして扱う。
-
-短い状態表示は回答待ちの要求コマンドを示す。`status <ID> --detail`は許可コマンド・全昇格履歴（判断の層`layer`・審査`review`・担当`cli`）・層ごとの件数`escalationCounts`・承認項目のID`approvalItems`を返す。要求と判断は`events.jsonl`の`escalation_requested`・`escalation_decided`、試行の`invocation.json`と`state.evidence[].escalations`に残り、理由・作業ディレクトリ・判断時刻・一致した許可を追跡できる。
-
-`run`の終了を待ち、決まった間隔で状態を読まない。進捗を尋ねられたときだけ`status <ID>`を1回読む。回答待ちの確認質問には記録を調べて根拠ファイルを示し、回答は全項目がそろってから1回で保存する。記録にない実行エージェントの判断理由だけ`answer <ID> <ファイル> --inquiry`で転送して`run`する。実行後は`inquiry.reply`を提示して元の`question`への回答を待つ。確認の質問は読み取り専用で実行し、工程を進めず元の質問・権限要求を保つ。承認待ちでは利用できない。
-
-`close <ID> [理由ファイル]`は実行中以外の案件を`closed`（終了）にする。理由ファイルはUTF-8で`agent-docs/`以下に置く。理由・前状態・時刻と履歴を保持し、再開や変更はできない。対象リポジトリの途中の変更には触れない。中断した`running`は実行器の停止と差分を確認して`retry`してから閉じる。アーカイブ成功時も理由`archived`で自動的に閉じ、失敗時は`completed`を保つ。終了した案件はダッシュボード・公開用要約・既定の`status`一覧から除外し、`status --all`または`status <ID>`で終了理由と前状態を確認できる。
-
-changeの実行前レビューは、同じモジュールを触り、同じ検証で確かめられ、間にユーザーの作業や承認がなく、独立レビューで確認できる大きさの`tasks.md`項目を一つの実行タスクにまとめる。承認の扱い・検証環境・必要な権限が異なる場合や、ユーザー作業を挟む場合、やり直しの費用が高い操作は分ける。根拠は`decisions.granularity`、項目番号はタスクのタイトルに記す。
-
-未完了タスクの承認計画には、対象タスク・操作・上限・停止条件・個別承認の要否（`gate`）に加え、実行スクリプト（`scripts`）、対象ファイル（`files`）、影響（`effect`は`read`・`write`・`external`）、費用上限の確認手段（`costCheck`）、追加のネットワーク・パス許可（`grants`）を記す。追加・変更分は`status`とローカルのダッシュボードに表示される。
-
-`node src/cli.js approve <ID> [--items <ID,...>] [条件ファイル]`で承認する。`--items A2,A3`のように指定するとその項目だけを承認し、省略すると承認待ちの全項目を承認する。残りがあれば回答待ちを続ける。条件ファイルはUTF-8で`agent-docs/`以下に置く。条件はその操作で承認した項目に付き、置き換え時に引き継がれ、再承認時に追記される。旧状態の案件全体の条件は全項目に適用する。
-
-承認した項目について、対象内に存在するスクリプトの実パスとSHA-256を固定する。`gate=plan`で申告された許可は、`grant`と同じ検証を経て案件全体に反映され、由来の項目IDが`grants.sources`に残る。項目を取り除いた後も許可は有効で、検証に失敗した場合は承認待ちを保つ。
-
-承認と差し戻しが混在する場合は、承認する項目を先に`approve --items`で登録し、残りの修正や拒否を`answer <ID> <回答ファイル>`で伝える。承認待ちの項目は差し戻し済みとして保持し、採番を引き継いで実行前レビューへ戻る。継続できるのは承認済みの項目で、差し戻し済みの項目は変更元に使える。差し戻し済みの項目の変更は承認待ちにし、再提案されなかった項目はレビュー成功時に取り除いて記録する。
-
-不要になった承認済みの項目は取り除いて記録する。所有者の回答だけに基づく承認済み項目の変更は、計画審査が回答の範囲内と判定すれば、固定情報を引き継いで置き換える。IDを持たない旧項目は読み込み時にIDを補い、`gate`がなければ`each`として扱う。実装が`outcome=approval`を返すと、完了タスクを保持して計画を見直し、手戻り回数に数える。
-
-状態確認・質問・完了報告は、skillを呼び出したチャットで受け取る。`status <ID>`で現在の試行・対象タスク・担当CLIとモデル、最新活動と受信時刻、直近の工程報告を確認できる。試行別履歴は`status <ID> --detail`と`data/dashboard.md`で確認する。活動は「報告」と「ツール観測」を区別し、500文字を超える報告は切り詰めて元ログへ誘導する。無報告は「報告未取得」とし、10秒ごとの状態更新では活動時刻を更新しない。内部思考・コマンド全文・ツール出力は表示しない。ツール成功はレビュー合格を意味しない。
-
-ダッシュボードは回答待ち、利用枠不足、復旧・再計画待ち、成果確認可能、進行中の順にまとめ、詳細に停止理由・質問・成果と検証へのリンクを置く。工程報告の`report`には対象、判断と理由、検証結果、残件を記録する。判断なしは空配列、未検証と残件なしは明記する。履歴の担当・対象は次タスクやモデル変更後も保持し、失敗時は報告を補わずログを参照する。旧履歴はsummaryを表示し、追加項目は未記録とする。省略はtasks.mdに所有者の回答番号と理由を記録する。changeの完了・アーカイブ前には未チェックのタスクと省略の回答番号を確認し、存在しない回答や確認の質問への参照を拒否する。完了とアーカイブの報告では、最終確認の`report.verification`から未検証の項目と根拠の回答番号を示す。回答番号は`status <ID> --detail`の`answers`で確認できる。完了はクライアントの承認を意味しない。状態ファイルと表示用要約の活動は実行中に10秒ごとに更新される。Markdownは工程境界や`status`で作り直し、詳細は最新3試行と全記録へのリンクを表示する。閲覧中のエディターが自動再読み込みしない場合は再度開く。
-
-`data/<ID>/state.json`が再開用状態、`events.jsonl`が工程ログ。`attempt-XXXX/`の`invocation.json`に担当・対象・最終活動、`result.json`に工程報告、`metrics.json`に成否・エラーと計測を保存する。Codexの通知は従来のexec形式へ変換して`codex.jsonl`に、RPCの送受信全行は方向付きで`codex-rpc.jsonl`に保存し、最後のagentMessageを`response.json`に残す。Claudeの元ストリームは`claude.jsonl`、最終resultは`claude.json`に残し、標準エラーは`stderr.log`で確認する。実装と実行前レビューではGitの差分と管理対象・未追跡ファイルのハッシュを`before.json`・`after.json`に記録する。OpenSpecのルートが別の場所にある場合は、証拠の`openspec`にルート・storeと`openspec/`配下の前後記録・変更ファイルを別に保存する。Gitで無視されたファイルは記録の対象外。要求やログに機密情報を含み得るため`data/`はGit対象外。prereviewの編集は選定したchange内だけに許可し、範囲外変更またはOpenSpec検証不合格はfailedにする。plan・review・acceptanceは読み取り専用。
-
-Codexは`--ephemeral`を使わず、履歴はCodex標準の`$CODEX_HOME/sessions/`（未指定なら`~/.codex/sessions/`）へ保存する。開発対象には保存しない。工程・CLI・モデル・推論レベルと外部証拠が一致する場合は保存したセッションに回答を渡して再開する。実行前レビューでは継続・変更元に使える承認項目のIDも渡す。不一致・再開失敗・retryは回答を含む新規コンテキストに戻し、工程が進めばセッションを捨てる。`kind`のない旧状態はrequestとして読み、completedの記録は書き換えない。
-
-各試行前に通常側のCodexの`account/rateLimits/read`またはClaudeの`/usage`から残りを取得する。Claudeは`--safe-mode`で利用者の設定・hook・MCP・pluginなどを読み込まず、モデルを呼ばずに取得し、30秒で打ち切る。初期固定値はplan・prereview・executeがセッション20%／週10%、review・acceptanceが10%／5%。通常側が閾値未満の場合だけ指定済みの代替を確認する。代替は取得できた窓が1つ以上あり、そのすべてが同じ閾値以上なら使用する（閾値一致は可）。通常側が全窓取得不能なら通常側で実行する。代替未指定・代替不足・代替の全窓取得不能ではモデルを呼ばず`limited`で停止する。取得失敗は候補別の`selection.normal` / `selection.fallback`の`rateLimitsFailure`に、`reason`（`timeout`: タイムアウト、`exit`: 異常終了、`spawn`: 起動失敗、`parse`: 解析失敗）、`elapsedMs`、最大200文字の`detail`を保存する。選択イベントにも残り、limitedの停止理由と利用枠欄には候補・理由・秒数を表示する。旧記録には失敗理由を補わない。枠はCLI単位で、モデル固有の残枠を保証しない。固定値は計測の根拠がない初期値であり、実績から見直す。
-
-代替は任意の`fallbacks.request/change.<工程>`に1組の`{ "model": "...", "effort": "..." }`を指定する。例えば通常側がCodexのexecuteなら、`workflow.config.json`へ次のトップレベル項目を追加できる。通常・代替が同じCLIになる設定は拒否する。既定の代替は用意しない。
-
-```json
-"fallbacks": {
-  "request": { "execute": { "model": "claude-opus-5-5", "effort": "medium" } },
-  "change": { "execute": { "model": "claude-opus-5-5", "effort": "medium" } }
-}
+```powershell
+npm test
 ```
 
-案件指定は既定値に優先して`state.fallbacks`へ保存する。開始時は`--fallback`を繰り返せる。通常側の`--model`もstart・start-changeで使用でき、すべての指定を組み合わせて検証する。
+実際のCodexを使う`npm run test:e2e`や計測スクリプトは[開発とテスト](docs/development.md)を参照。
 
-```text
-node src/cli.js start C:\path\to\target agent-docs\request.md --fallback execute claude-opus-5-5 medium
-node src/cli.js start-change C:\path\to\target sample-change --fallback prereview gpt-6-luna high --fallback execute claude-opus-5-5 medium
-node src/cli.js fallback <ID> execute claude-opus-5-5 medium
-node src/cli.js fallback <ID> execute --disable
-node src/cli.js retry <ID>
-node src/cli.js run <ID>
-```
+## 文書
 
-停止中の`fallback`は設定だけを変更し、質問や停止状態を保持する。`--disable`は案件に`null`を保存して既定の代替も無効化する。`limited`は枠の回復・指定変更後に`retry`、`waiting`は必要な回答・承認後に`run`する。通常側を変更する`model`でも代替との整合性を検証し、不正操作は保存しない。
-
-選択した代替CLIの起動・認証・必要なアクセス確認に失敗した場合は、モデルを起動せず`failed`で止まる。未選択の代替CLIは必須確認に含めない。承認・許可・工程の編集制限は切替後も維持する。担当が変われば要求・回答・承認・証拠を含む完全入力を使い、同じ担当で条件を満たす回答後はセッションを再開する。実行中の上限到達は途中の記録を保存して`limited`で止まり、自動切替・自動再試行はしない。候補別の枠と選択理由はイベント・status・ダッシュボード、実担当は試行履歴・invocation・metricsで確認できる。
-
-executeが`error`を返すのは、対象コードを変えずに解消できる実行器・ツール・環境の問題と明確に判断できる場合に限る。全工程で`error`の`cause`には、やり直しで解消し得る問題なら`transient`、所有者やホスト管理者の対応が必要な場合や区分の判断がつかない場合は`environment`を指定する。検証でこのchangeの差分に起因する不具合を見つけ、現在のdesign・specの範囲で直せる場合は、その場で直して検証を続ける。範囲外・計画の変更が必要・原因不明の場合は、tasks.mdを編集せず`replan`で実行前レビュー（自由記述ではplan）に戻し、失敗箇所・再現状況・ログ・変更ファイルとの重なりを報告する。
-
-`replan`は所有者が計画の見直しや検証の省略・変更を指示した場合にも使い、手戻りには数えない。所有者の回答なしで2回に達すると`waiting`になり、最新の報告と計画の見直し・検証の省略や変更・`close`の選択肢を提示する。確認の質問を除く回答で回数をリセットする。
-
-失敗後はセッションを破棄する。CLI・プロセスの不調（`process`）、結果の検証エラー（`invalid`）、一時的な問題の報告（`reported-transient`）は、同じ工程・対象タスクの最初の失敗に限り、新規コンテキストで1回自動再試行する。再試行の担当も試行前の利用枠で決める。実行前確認の失敗（`preflight`）、所有者の対応が必要な問題の報告（`reported-environment`）、再試行の失敗では`failed`で止まる。同じ対象の連続失敗回数と各失敗の試行・CLI・モデル・種類・要約（各500文字まで）・変更ファイルを保存する。`status`と`status --detail`には最初の失敗から表示し、`limited`でも記録を保持する。2回以上なら人の判断が必要と表示する。再試行には失敗記録を渡し、直前の変更を未承認として照合し、回数を制限された承認を使い切っていれば再実行せず停止するよう指示する。手動の`retry`は、途中の差分とログを確認し、許可範囲内で原因に手を打った場合かユーザーの指示がある場合だけ実行する。自動ロールバックは行わない。
-
-executeのpartialで対象とOpenSpecルートの変更がどちらもない状態が2回続くと`waiting`で止まる。ルートは最新の報告・続行／計画見直し／closeの選択肢と影響を含む質問をそのまま提示する。回答で進捗なし回数を0に戻し、同じタスクを新規コンテキストで再開する。変更ありpartialで連続回数をリセットし、partial以外では消す。partialの通算上限10回は維持する。
-
-同じdataルートでは、別IDかつ対象ディレクトリ群が独立した案件を同時実行できる。同じIDのrun／step二重起動は禁止する。開発対象、追加の書き込み許可先（grantの追加予定先も含む）、changeのOpenSpecルート全体を操作終了まで予約する。同一・親子・symlink／junctionによる別名、Windowsの大小文字違いは競合として即時拒否する。別対象でも共有ストアを使うchangeは競合する。statusは実行中も利用できる。状態・表示・公開記録の共有更新だけを短く直列化し、取得待ちは5秒を上限とする。モデル実行・公開通信は共有ロック外で行う。
-
-実行器を起動する環境には、既存の`data`への書き込み権限が必要。別の`data`を使うと案件と予約は共有されない。新旧実行器の混在を避けるため、切替前に全実行器・子プロセス・公開者を停止し、同じ実行器を使う全チャットを更新する。旧`data/executor.lock`が残る間は更新操作を拒否する。既存state・回答・承認・証拠・試行は移行せず再利用する。
-
-共有更新ロックへの書き込み拒否（`open wx`、`EPERM`）が出たら、エラーに示された`data`への書き込み権限を起動環境に付与し、同じ`data`で再実行する。ダッシュボードを更新できないときも、`status`は標準エラーに理由を表示し、保存済みの案件状態を標準出力に表示する。
-
-強制終了後は`data/reservations/<所有者トークン>.json`（ID・PID・開始時刻・対象群）、`data/shared-update.lock`（PID・所有者トークン・開始時刻）、旧`data/executor.lock`を確認する。壊れた記録や解決不能な対象も無視せず停止する。経過時間やPID不在だけでは削除せず、所有者・その子プロセスの終了と対象差分を確認し、該当ファイルだけを手動削除する。他所有者の予約は削除しない。`running`は変更確認後に既存の`retry`で復旧する。生存中のロックは削除しない。ロールバック時も全新プロセスと子・公開者を停止し、差分と残存予約を整理してから旧版へ戻す。
-
-レビュー差し戻しはワークフロー全体で3回まで。4回目には`blocked`となる。原因と要求を見直し、新たなワークフローを開始する。完了済みタスクは再定義の対象に含めない。
-
-差し戻し時はrequestなら`plan`、changeなら`prereview`で未完了分を再定義する。旧`granularity/architecture`で停止した案件も、次の実行前確認が通った後に`plan`へ戻し、移行をイベントに残す。完了タスク・回答・証拠・試行番号・手戻り回数を保持し、完了済み案件の保存状態やログは変更しない。
-
-## Androidからダッシュボードを読む
-
-`data/dashboard.json`は表示用の要約、`data/dashboard.md`はローカルの詳細一覧。要約はローカルパス・ログ参照・外部証拠本文を除き、工程報告を切り詰める。非共有のClaude Artifactへ要約を埋め込んだHTMLを再公開すると、Androidアプリでも開いたまま更新を読める。閲覧専用で、回答・再開はチャットから行う。
-
-1. claude.aiにログイン済みのClaude Code CLIを用意する。APIキー認証ではArtifactを公開できない。
-2. `CLAUDE_CODE_ARTIFACT=1`を指定し、Claudeに`docs/dashboard-artifact.html`を編集せず、capabilitiesなしのplain pageとして非共有で公開するよう依頼する。`-p`を使う場合は`--tools Artifact,Read --allowedTools Artifact,Read --permission-mode dontAsk`を指定する。共有メニューは変更しない。
-3. `workflow.config.json`と同じディレクトリに、次の`workflow.config.local.json`を作成して発行されたURLを設定する。このファイルはgit管理外なので、実行器の更新でも設定が残る。
-
-```json
-{
-  "dashboardArtifact": {
-    "url": "https://claude.ai/artifact/発行されたID",
-    "model": "claude-haiku-5-5",
-    "timeoutSeconds": 120
-  }
-}
-```
-
-URL以外は省略でき、上記が既定値。ローカル設定は`dashboardArtifact`だけを受け付け、同キーがあれば共有設定を丸ごと置き換える。共有設定の既存値も引き続き有効だが、URLはローカル設定へ移して共有側から削除する。URL未設定ではClaudeを起動しない。URLは`https://claude.ai/artifact/<ID>`または`https://claude.ai/code/artifact/<ID>`、打ち切りは正の整数秒とする。公開先を開くには所有者のアカウントでログインする。
-
-公開は表示分類・工程・案件の増減・新しい質問など対応事項の変化時と公開先URLの変更時に行う。活動・完了タスク数だけの変化や実行待ちと実行中の切り替わりでは公開しない。旧設定の`intervalSeconds`は指定できるが使わない。状態保存は公開の終了を待たない。公開中の対応事項の変化も終了後に拾い、失敗時は60秒後・300秒後に最大2回再試行する。失敗はワークフローへ伝えない。`data/dashboard-publish.json`とMarkdown末尾に最終成功・新しい失敗を記録する。通信・利用枠・CLIの機能変更で公開できない場合は、認証とネットワークを確認し、次の保存または`status`で再試行する。
-
-**要約はclaude.ai上に保存される。** 案件名・質問・報告等の表示文が外部保存に適することを確認し、Artifactは非共有のまま運用する。公開用一時HTMLは`agent-docs/`に作成して終了時に削除する。公開を停止するにはローカル設定の`dashboardArtifact`を`{}`にしてURLを未設定にし、既に起動した公開処理の終了を待つ。保存済みのArtifact自体は残る。
-
-## 検証
-
-`npm test`で、状態遷移、差し戻し、質問・回答、失敗、保存、排他制御を確認する。実装とテストを`agent-docs/`へコピーし、固定の`test/fixtures/workflow.config.json`で実行するため、運用中の共有・ローカル設定には依存しない。一時データは終了時に削除する。実際のCodex実行にはログイン・通信・利用枠が必要であり、単体テストでは代替の実行関数を用いる。
-
-`npm run test:e2e`は実際のCodexで質問・回答・実装・レビュー・完了を確認する。利用枠を消費するため通常のテストには含めない。隔離した開発対象と実行器データを`agent-docs/`に作成し、検証後も結果を残す。テスト用クライアントの回答は固定した試験仕様であり、実際のユーザーへの質問を自動回答する機能ではない。
-
-各試行の`metrics.json`に時間・成否・トークン・CLI・モデル・推論レベル・セッション・新規／再開・前後の利用枠を、ワークフロー直下の`performance.json`に試行一覧と集計を保存する。未取得値は`null`、集計の`complete: false`は欠落を含む。計測導入前の試行もある案件では、`activeComplete: false`として稼働時間の合計も部分値と示す。キャッシュ入力は入力の内訳であり加算しない。Claudeの入力は通常・キャッシュ読取・キャッシュ作成の合計とする。工程稼働時間と、質問・復旧待ちを含む開始から最終試行までの経過時間を分ける。
-
-Codexの`usage`には、セッションを再開した場合もその試行で使ったトークンだけを記録する。`threadUsage`は取得できた試行終了時点のスレッド累計で、性能レポートのトークン合計からは除外する。修正前の再開試行の記録は、再開前の分が重複して過大になっている。比較にはRPCログから再計算した値か、修正後の測定値を使う。
-
-経費集計の比較試験は`node scripts/benchmark.mjs control`または`improved`で各3回実行する（利用枠を消費する）。`control`は計画統合前、`improved`は統合後のコードで実行する。要求と独立検証は`test/fixtures/expenses/`、測定条件と各回の結果は`agent-docs/benchmark-*/`へ保存する。`node scripts/compare-benchmarks.mjs <対照ディレクトリ> <改善版ディレクトリ>`で各回・中央値・悪化項目を含む比較Markdownを生成する。同じモデル・推論設定・環境・要求であることを確認し、共有キャッシュの揺らぎと失敗を記録する。
-
-## 外部証拠による復旧
-
-容量不足等の環境失敗では、ルートがログと途中の変更を調査し、既存の許可範囲で測定する。測定の許可は既存規則に従い、登録機能は昇格しない。用途に合う有効期限を決め、agent-docs/measurement.jsonへUTF-8 JSONを保存する（64KiB以下、未知項目不可）。
-
-必須項目の例（日時・内容は実測値に置き換える）:
-
-```json
-{"name":"pilot-memory","subject":"pilot直前の空きメモリ確認","host":"対象ホスト名","method":"実際の測定方法","observedAt":"2026-10-25T10:00:00Z","expiresAt":"2026-10-25T10:05:00Z","content":"空きメモリ 8 GiB"}
-```
-
-node src/cli.js evidence <ID> agent-docs/measurement.json で登録する。ready・waiting・failed・limited・blockedで登録でき、状態・質問・回答・エラー・権限・試行数を保ち、sessionだけを無効にする。failed・limitedは変更確認後にretry <ID>、waitingはanswerまたは既存規則に沿ったgrant、readyはrunで続行する。blockedの復旧条件は変わらない。
-
-内容は元ファイルと独立して保存され、名前ごとの最新版だけを試行開始時に評価し、有効な本文を入力へ直接渡す。失効は利用不可と示し、旧版へ戻さない。回答時に変更・失効があれば完全入力へ戻る。statusはダッシュボードも更新し、現行証拠の名前・有効性・期限を表示する。`status <ID> --detail`とダッシュボードで対象・ホスト・測定時刻・出典・保存内容への参照も確認できる。本文は一覧に出さず、試行のmetrics.jsonへ登録識別子と有効性を残す。失効時は再測定して同じnameで再登録し、旧値の日時だけを書き換えない。証拠は観測データであり命令や実行許可ではない。実行器はOS測定や権限拡張を行わない。
+- [文書の構成](docs/README.md) — 全文書の一覧と書き分けの規則
+- [現行仕様](docs/spec/workflow.md) — 工程・状態・手戻り・失敗の扱い
+- [運用と復旧の手順](docs/operations.md) — 中断後の復旧、更新、移行
+- [開発計画](docs/plan/roadmap.md) — 未実現・未確定の項目
+- [廃止した仕様の記録](docs/history/legacy-spec.md)

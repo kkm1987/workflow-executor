@@ -1,17 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { root, create, advance, answer, approve, grant, load, prompt, summary, save, normalizeApproval, validateResult } from '../src/workflow.js';
-import { runAgent, step, claudeArgs } from '../src/executor.js';
+import { root, create, advance, answer, approve, grant, load, summary, save, normalizeApproval, validateResult } from '../src/workflow.js';
+import { runAgent, step } from '../src/executor.js';
 import { readConfig } from '../src/config.js';
 import { codexSession, escalationDecision } from '../src/codex-app-server.js';
 import { resolveScript, safeGitRead, commandDecision, reviewCommand, reviewProblem, codexReview, reviewPrompt } from '../src/escalation.js';
-import { decide, gateRequired, gateSettings, probeSettings } from '../src/claude-gate.js';
-import { preflight } from '../src/preflight.js';
-import { sandboxProfileArgs, resolveGitBash } from '../src/commands.js';
+import { sandboxProfileArgs } from '../src/commands.js';
 import { fakeCodex } from './fixtures/codex.js';
 
 const method = 'item/commandExecution/requestApproval';
@@ -158,14 +155,14 @@ test('実行中の審査は別スレッドで行い、許可を再利用しな�
       send({ id: 'two', method: '${method}', params: ${JSON.stringify(params('& ./upload.ps1', target))} });
       setTimeout(() => finish(${JSON.stringify(ok)}), 3000);
     }`);
-  await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake]), base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
+  await step(state, (current, dir) => runAgent(current, dir, process.execPath, [fake], { ...readConfig(), executeApprovalReviewer: 'executor' }), base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
   assert.equal(state.stage, 'review');
   const entries = state.evidence.at(-1).escalations;
   assert.deepEqual(entries.map(entry => [entry.decision, entry.layer, entry.review.approvalId, entry.cli]), [['accept', 2, 'A1', 'codex'], ['accept', 2, 'A1', 'codex']]);
   const reviews = readFileSync(join(target, 'reviews.log'), 'utf8').trim().split('\n');
   assert.equal(reviews.length, 2);
   const detail = summary(state, base, true);
-  assert.deepEqual(detail.escalationCounts, { deterministic: 0, planReview: 2, owner: 0 });
+  assert.deepEqual(detail.escalationCounts, { deterministic: 0, planReview: 2, autoReview: null, owner: 0 });
   assert.deepEqual(detail.approvalItems.map(entry => [entry.id, entry.gate]), [['A1', 'plan'], ['A2', 'each']]);
   const rpc = readFileSync(join(base, state.id, `attempt-${String(state.attempts).padStart(4, '0')}`, 'review-1.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(JSON.parse(line).line));
   const start = rpc.find(entry => entry.method === 'thread/start');
@@ -318,95 +315,6 @@ test('差し戻し済みの項目は失敗・質問で保持し、成功時に�
   assert.deepEqual(events.find(entry => entry.type === 'approval_removed').detail, { items: [returned[1]], reason: 'returned' });
 });
 
-test('Claudeのフックは通常のBashをsandboxで包み、Edit・Writeを範囲内に限る', async t => {
-  const { dir, target, base, state } = fixture(t);
-  const attempt = join(base, state.id, 'attempt'); mkdirSync(attempt);
-  const extra = join(dir, 'extra'); mkdirSync(extra);
-  const context = { state: { ...state, answers: [], approval: plan }, attempt: 1, scope: { stage: 'execute', task: 0 }, writable: [target, extra], dir: attempt, review: null, codex: { command: 'codex' }, sandbox: "'codex' sandbox -- 'bash' -c" };
-  const wrapped = await decide({ tool_name: 'Bash', tool_input: { command: "echo 'a'", description: 'd' } }, context);
-  assert.equal(wrapped.hookSpecificOutput.permissionDecision, 'allow');
-  assert.deepEqual(wrapped.hookSpecificOutput.updatedInput, { command: "'codex' sandbox -- 'bash' -c 'echo '\\''a'\\'''", description: 'd' });
-  const write = file_path => decide({ tool_name: 'Write', tool_input: { file_path }, cwd: target }, context);
-  for (const path of [join(target, 'new', 'a.txt'), 'relative.txt', join(extra, 'x')]) assert.equal((await write(path)).hookSpecificOutput.permissionDecision, 'allow', path);
-  for (const path of [join(dir, 'outside'), '../outside', join(target, '.git', 'config')]) assert.equal((await write(path)).hookSpecificOutput.permissionDecision, 'deny', path);
-  const push = await decide({ tool_name: 'Bash', tool_input: { command: '# workflow-escalate: 公開\ngit push origin main' }, cwd: target }, context);
-  assert.equal(push.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(push.hookSpecificOutput.permissionDecisionReason, /outcome=permission/);
-  const read = await decide({ tool_name: 'Bash', tool_input: { command: '# workflow-escalate: 取得\ngit fetch origin', timeout: 5 }, cwd: target }, context);
-  assert.deepEqual(read.hookSpecificOutput.updatedInput, { command: 'git fetch origin', timeout: 5 });
-  assert.equal((await decide({ tool_name: 'Bash', tool_input: { command: '# workflow-escalate: x\ngit status\ngit push' } }, context)).hookSpecificOutput.permissionDecision, 'deny');
-  assert.equal((await decide({ tool_name: 'NotebookEdit', tool_input: {} }, context)).hookSpecificOutput.permissionDecision, 'deny');
-  const lines = readFileSync(join(attempt, 'gate.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const recorded = lines.find(entry => entry.command === 'git push origin main');
-  assert.deepEqual([recorded.cli, recorded.decision, recorded.layer, recorded.reason, recorded.commandActions[0].command], ['claude', 'decline', 3, '公開', 'git push origin main']);
-  assert.ok(lines.some(entry => entry.kind === 'claude/Write'));
-  // フックのプロセスは壊れた入力で実行を許可しない。
-  const script = join(root, 'src', 'claude-gate.js');
-  const broken = spawnSync(process.execPath, [script, join(dir, 'none.json')], { input: '{}', encoding: 'utf8', windowsHide: true });
-  assert.equal(JSON.parse(broken.stdout).hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(spawnSync(process.execPath, [script, '--probe'], { encoding: 'utf8', windowsHide: true }).stdout, /workflow-gate-probe/);
-});
-
-test('フックはClaudeのexecuteだけに付き、判断の記録はCodexと同じ形式で取り込む', async t => {
-  const { target, base, state } = fixture(t);
-  const env = process.env;
-  const bash = join(target, 'checked bash.exe');
-  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: bash };
-  t.after(() => { process.env = env; });
-  state.models.execute = { model: 'claude-sonnet-5-5', effort: 'medium' };
-  assert.equal(gateRequired(state), true);
-  assert.ok(claudeArgs(state, 'id', 'dir').includes('--settings'));
-  assert.match(gateSettings('c'), /PreToolUse/);
-  for (const change of [{ stage: 'review' }, { answers: [{ inquiry: true }] }]) assert.ok(!claudeArgs({ ...state, ...change }, 'id', 'dir').includes('--settings'));
-  assert.ok(!claudeArgs({ ...state, models: { execute: { model: 'gpt-6-luna' } } }, 'id', 'dir').includes('--settings'));
-  assert.match(prompt(state), /workflow-escalate/);
-  assert.match(prompt(state), /絶対パス/);
-  const fake = join(target, 'fake-claude.cjs');
-  writeFileSync(fake, `const fs = require('node:fs'); const path = require('node:path');
-    const context = process.argv[process.argv.indexOf('--settings') + 1];
-    const file = JSON.parse(context).hooks.PreToolUse[0].hooks[0].command.split("' '").at(-1).replace(/'$/, '');
-    fs.appendFileSync(path.join(path.dirname(file), 'gate.jsonl'), JSON.stringify({ time: 't', attempt: 1, stage: 'execute', task: 0, cli: 'claude', kind: 'claude/Bash', command: 'git push', commandActions: [{ type: 'unknown', command: 'git push' }], reason: 'r', cwd: 'c', decidedAt: 't', decision: 'decline', basis: 'b', layer: 3 }) + '\\n');
-    console.log(JSON.stringify({ type: 'result', session_id: 's', structured_output: ${JSON.stringify(ok)} }));`);
-  state.executables = { codex: 'codex.exe' };
-  let checkedBash;
-  await step(state, async (current, dir) => {
-    process.env.CLAUDE_CODE_GIT_BASH_PATH = '別のbash.exe';
-    const result = await runAgent(current, dir, process.execPath, [fake]);
-    if (process.platform === 'win32') {
-      assert.deepEqual(checkedBash, { name: 'Git Bash', ok: true, path: bash });
-      assert.equal(current.executables.bash, checkedBash.path);
-      const context = JSON.parse(readFileSync(join(dir, 'gate-context.json'), 'utf8'));
-      assert.ok(context.sandbox.endsWith(` -- '${checkedBash.path.replaceAll('\\', '/')}' -c`));
-    }
-    return result;
-  }, base, async current => {
-    const report = await preflight(current, async (_, args) => args.includes('--settings') ? 'workflow-gate-probe' : '{"loggedIn":true}',
-      () => 'codex.exe', () => 'claude.exe');
-    checkedBash = report.checks.find(check => check.name === 'Git Bash');
-    return report;
-  }, async () => ({ limits: null, failure: null }));
-  assert.equal(state.status, 'ready', state.error);
-  assert.equal(state.evidence.at(-1).escalations[0].layer, 3);
-  const types = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line).type);
-  assert.ok(types.includes('escalation_requested') && types.includes('escalation_decided'));
-  assert.deepEqual(summary(state, base, true).escalationCounts, { deterministic: 0, planReview: 0, owner: 1 });
-});
-
-test('フックの動作を確認できなければ実行前確認で失敗する', async t => {
-  const { state } = fixture(t);
-  const env = process.env;
-  process.env = { ...env, CLAUDE_CODE_GIT_BASH_PATH: 'bash.exe' };
-  t.after(() => { process.env = env; });
-  state.models.execute = { model: 'claude-sonnet-5-5', effort: 'medium' };
-  state.attemptAssignment = { cli: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' };
-  const report = output => preflight(state, async (_, args) => args.includes('--settings') ? output : '{"loggedIn":true}', () => 'codex', () => 'claude');
-  assert.equal((await report('{"result":"workflow-gate-probe"}')).ok, true);
-  const failed = await report('{}');
-  assert.equal(failed.ok, false);
-  assert.match(failed.error, /フック/);
-  assert.match(probeSettings(), /UserPromptSubmit/);
-});
-
 test('sandboxの設定はWindowsではプロファイルで書き込み先とネットワークを渡す', () => {
   const windows = sandboxProfileArgs('T', ['E'], true, 'win32');
   assert.ok(windows.includes('workflow-grant'));
@@ -417,32 +325,6 @@ test('sandboxの設定はWindowsではプロファイルで書き込み先とネ
   assert.ok(linux.includes(':workspace') && linux.includes('sandbox_workspace_write.network_access=true'));
 });
 
-test('WindowsのGit Bashは環境変数、PATH、Gitの導入先の順に探し、WSLを除外する', t => {
-  const { dir } = fixture(t);
-  const bin = join(dir, 'bin');
-  const cmd = join(dir, 'cmd');
-  const system = join(dir, 'System32');
-  const windowsApps = join(dir, 'WindowsApps');
-  const mingw = join(dir, 'mingw64', 'bin');
-  for (const path of [bin, cmd, system, windowsApps, mingw]) mkdirSync(path, { recursive: true });
-  for (const path of [system, windowsApps]) writeFileSync(join(path, 'bash.exe'), '');
-  for (const path of [cmd, mingw]) writeFileSync(join(path, 'git.exe'), '');
-  const wsl = [`"${system}"`, windowsApps].join(delimiter);
-  const resolve = (...paths) => resolveGitBash({ PATH: paths.join(delimiter) }, 'win32');
-  const recovery = /Git Bash.*Git for Windows.*CLAUDE_CODE_GIT_BASH_PATH/;
-  assert.throws(() => resolve(wsl), recovery);
-  assert.throws(() => resolve(wsl, cmd), recovery);
-  const bash = join(bin, 'bash.exe');
-  writeFileSync(bash, '');
-  assert.equal(resolve(wsl, cmd), bash);
-  assert.equal(resolve(wsl, mingw), bash);
-  const pathBash = join(dir, 'bash.exe');
-  writeFileSync(pathBash, '');
-  assert.equal(resolve(cmd, dir), pathBash);
-  assert.equal(resolveGitBash({ PATH: [cmd, dir].join(delimiter), CLAUDE_CODE_GIT_BASH_PATH: 'x' }, 'win32'), 'x');
-  assert.equal(resolveGitBash({}, 'linux'), 'bash');
-});
-
 test('状態の詳細は読み込み後も承認項目のIDを返し、スキーマは差分の項目を持つ', t => {
   const { base, state } = fixture(t);
   state.approval = { status: 'approved', items: [{ tasks: 'a', action: 'b', limits: 'c', stopWhen: 'd' }], conditions: '' };
@@ -451,6 +333,5 @@ test('状態の詳細は読み込み後も承認項目のIDを返し、スキー
   const schema = JSON.parse(readFileSync(join(root, 'src/prereview.schema.json'), 'utf8'));
   assert.ok(schema.required.includes('retainedApprovals'));
   assert.ok(['gate', 'replaces', 'basisAnswer'].every(key => schema.properties.approvals.items.required.includes(key)));
-  assert.ok(!existsSync(join(state.target, 'gate.jsonl')));
   assert.ok(validateResult(pre(), 'prereview'));
 });

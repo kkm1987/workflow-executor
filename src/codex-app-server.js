@@ -19,12 +19,23 @@ export function execItem(item) {
   }
 }
 
-export function escalationDecision(state, method, params) {
+export function rejectApproval(method) {
   if (method === 'mcpServer/elicitation/request') return { decision: 'cancel', basis: '対話入力は取り消し', layer: 1, result: { action: 'cancel' } };
   if (method === 'item/tool/requestUserInput') return { decision: 'cancel', basis: '対話入力は取り消し', layer: 1, result: { answers: {} } };
   if (method === 'item/permissions/requestApproval') return { decision: 'decline', basis: '追加権限は既存のgrantで管理', layer: 1, result: { permissions: {}, scope: 'turn' } };
   if (method === 'item/fileChange/requestApproval') return { decision: 'decline', basis: 'ファイル変更は既存の書き込みパスで管理', layer: 1, result: { decision: 'decline' } };
-  if (method !== 'item/commandExecution/requestApproval') return null;
+  if (method === 'item/commandExecution/requestApproval') {
+    return { decision: 'decline', layer: 1, result: { decision: 'decline' } };
+  }
+  if (['applyPatchApproval', 'execCommandApproval'].includes(method)) {
+    const basis = '旧プロトコルの承認要求を拒否しました';
+    return { decision: 'decline', basis, layer: 1, result: { decision: { denied: { rejection: basis } } } };
+  }
+  return null;
+}
+
+export function escalationDecision(state, method, params) {
+  if (method !== 'item/commandExecution/requestApproval') return rejectApproval(method);
   if (state.stage === 'execute' && !state.answers?.at(-1)?.inquiry && params.networkApprovalContext != null) {
     const decision = state.grants?.network ? 'accept' : 'decline';
     return { decision, basis: state.grants?.network ? 'grants.network' : 'ネットワークの許可なし', layer: 1, result: { decision } };
@@ -34,7 +45,7 @@ export function escalationDecision(state, method, params) {
   return { ...choice, result: { decision: choice.decision } };
 }
 
-export function codexSession(child, { thread, turn, emit, raw, output, complete, fail, approval = () => null }) {
+export function codexSession(child, { thread, turn, emit, raw, output, complete, fail, approval = () => null, autoReview = () => {}, probe = false }) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
   let threadId;
@@ -85,11 +96,20 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
           result.then(value => { if (held.delete(id) && !finished) respond(value); }, error => { if (held.delete(id)) fail(error); });
         }
       } else if (id !== undefined) {
-        if (message.error) { fail(new Error(JSON.stringify(message.error))); return; }
+        if (message.error) {
+          fail(new Error(probe ? `app-serverが承認判断者 ${thread.approvalsReviewer} の確認に失敗しました` : JSON.stringify(message.error)));
+          return;
+        }
         if (id === 1 && !interrupted) {
           send({ method: 'initialized', params: {} });
           send({ id: 2, method: thread.threadId ? 'thread/resume' : 'thread/start', params: thread });
         } else if (id === 2) {
+          if (probe) {
+            finished = true;
+            if (message.result?.approvalsReviewer === thread.approvalsReviewer) complete();
+            else fail(new Error(`app-serverの承認判断者が ${thread.approvalsReviewer} と一致しません`));
+            return;
+          }
           threadId = message.result.thread.id;
           emit({ type: 'thread.started', thread_id: threadId });
           if (!interrupted) send({ id: 3, method: 'turn/start', params: { ...turn, threadId } });
@@ -103,6 +123,8 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
         if (method === 'item/completed' && params.item.type === 'agentMessage' && !subagent) finalMessage = params.item.text;
       } else if (subagent) {
         continue;
+      } else if (method === 'item/autoApprovalReview/completed') {
+        if (turnStarted && params.turnId === turnId) autoReview(params);
       } else if (method === 'turn/started') {
         turnId = params.turn.id;
         turnStarted = true;

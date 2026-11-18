@@ -20,6 +20,49 @@ function fixture(t, body, onResume) {
 }
 const lines = (attempt, file) => readFileSync(join(attempt, file), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
+test('自動レビュー中に実行器に届いた承認は、許可に一致しても拒否して記録する', async t => {
+  const method = 'item/commandExecution/requestApproval';
+  const command = 'Write-Output test';
+  const { state, attempt, run } = fixture(t, `
+    send({ id: 'request', method: '${method}', params: { command: '${command}', commandActions: [{ command: '${command}' }] } });
+    finish({});
+  `);
+  state.stage = 'execute';
+  state.grants = { commands: [command] };
+  await run();
+  const rpc = lines(attempt, 'codex-rpc.jsonl').map(entry => JSON.parse(entry.line));
+  assert.deepEqual(rpc.find(entry => entry.id === 'request' && entry.result).result, { decision: 'decline' });
+  const decision = state.evidence.at(-1).escalations.at(-1);
+  assert.equal(decision.kind, method);
+  assert.equal(decision.command, command);
+  assert.equal(decision.decision, 'decline');
+  assert.match(decision.basis, /自動レビュー/);
+});
+
+test('自動レビューの完了通知から対象turnの判断だけを記録する', async t => {
+  const { state, attempt, run } = fixture(t, `
+    const params = { threadId: 'fake', turnId: 'turn', reviewId: 'r1', startedAtMs: 1000, completedAtMs: 2000,
+      action: { type: 'command', command: 'Get-Item marker', cwd: process.cwd() },
+      review: { status: 'denied', rationale: '根拠' } };
+    notify('item/autoApprovalReview/started', params);
+    notify('item/autoApprovalReview/completed', { ...params, threadId: 'other' });
+    notify('item/autoApprovalReview/completed', { ...params, turnId: 'old' });
+    notify('item/autoApprovalReview/completed', params);
+    finish({});
+  `);
+  state.stage = 'execute';
+  await run();
+  const records = JSON.parse(readFileSync(join(attempt, 'invocation.json'), 'utf8')).escalations;
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record.layer, 'autoReview');
+  assert.equal(record.command, 'Get-Item marker');
+  assert.equal(record.decision, 'decline');
+  assert.equal(record.basis, '根拠');
+  assert.equal(record.decidedAt, '1970-01-01T00:00:02.000Z');
+  assert.deepEqual(state.evidence.at(-1).escalations, records);
+});
+
 test('RPCの初期化・再開・承認方針・スキーマ・effortと最終応答を維持し、復元分のusageを除く', async t => {
   const { state, attempt, run } = fixture(t, `
     notify('unknown', { value: '生ログのみ' });

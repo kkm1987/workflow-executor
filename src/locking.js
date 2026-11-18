@@ -78,7 +78,7 @@ export function overlaps(a, b) {
 }
 export function reserve(base, select) {
   return withSharedLock(base, () => {
-    if (existsSync(join(base, 'executor.lock'))) throw new Error('旧executor.lockが残っています。全実行器・子プロセスを停止しREADMEの復旧手順を確認してください');
+    if (existsSync(join(base, 'executor.lock'))) throw new Error('旧executor.lockが残っています。全実行器・子プロセスを停止しdocs/operations.mdの復旧手順を確認してください');
     const { id, paths } = select();
     if (typeof id !== 'string' || !id || !Array.isArray(paths) || !paths.length) throw new Error('予約対象が不正です');
     const directories = [...new Set(paths.map(canonicalDirectory))];

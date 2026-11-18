@@ -62,7 +62,10 @@ test('CLIのapprove --itemsは指定した項目だけを承認・予約し、�
   const extra = join(dir, 'extra');
   mkdirSync(target);
   mkdirSync(extra);
-  const state = create(target, '部分承認の確認', base, undefined, { models: { execute: { model: 'claude-opus-5-5' } } });
+  const state = create(target, '部分承認の確認', base);
+  state.executables = { codex: process.execPath };
+  const sandbox = join(target, 'sandbox');
+  writeFileSync(sandbox, 'process.exit(0);\n');
   const pending = [
     { id: 'A1', gate: 'plan', action: '追加のパスを使う', grants: { network: false, paths: [extra] } },
     { id: 'A2', gate: 'plan', action: 'ファイルを確認する' },

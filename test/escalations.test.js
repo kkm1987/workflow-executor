@@ -16,6 +16,25 @@ const result = { returnTo: 'none', outcome: 'ok', cause: '', summary: '確認済
   report: { scope: 'CIM', decisions: [], verification: '取得結果', remaining: 'なし' } };
 const permission = { ...result, outcome: 'permission', question: 'CIM取得が必要。許可しない場合は検証できません。', permission: { network: false, paths: [], commands: [command] } };
 const jsonLines = path => readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);
+test('Codexの昇格の判断者はexecuteの作業だけで切り替わる', () => {
+  for (const executeApprovalReviewer of ['auto-review', 'executor']) {
+    for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
+      for (const inquiry of [false, true]) {
+        const state = { stage, answers: [{ inquiry }], attemptAssignment: { cli: 'codex' } };
+        const config = { executeApprovalReviewer };
+        const active = stage === 'execute' && !inquiry;
+        const policy = active ? 'on-request' : 'never';
+        const reviewer = active && executeApprovalReviewer === 'auto-review' ? 'auto_review' : 'user';
+        const args = codexArgs(state, config);
+        const thread = codexThread(state, config);
+        assert.ok(args.includes(`approval_policy="${policy}"`));
+        assert.ok(args.includes(`approvals_reviewer="${reviewer}"`));
+        assert.equal(thread.approvalPolicy, policy);
+        assert.equal(thread.approvalsReviewer, reviewer);
+      }
+    }
+  }
+});
 function fixture(t) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'escalations-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -63,7 +82,7 @@ test('拒否→権限要求→grant→同じセッションで許可を記録し
   fakeCodex(fake, `
     send({ id: 'approval', method: '${method}', params: ${JSON.stringify(params())} });
     setTimeout(() => finish(input.includes('許可しました') ? ${JSON.stringify(result)} : ${JSON.stringify(permission)}), 100);`);
-  const runner = (current, dir) => runAgent(current, dir, process.execPath, [fake]);
+  const runner = (current, dir) => runAgent(current, dir, process.execPath, [fake], { executeApprovalReviewer: 'executor', escalationReview: null });
   const check = async () => ({ ok: true });
   const limits = async () => ({ limits: null, failure: null });
   await step(state, runner, base, check, limits);
@@ -74,7 +93,7 @@ test('拒否→権限要求→grant→同じセッションで許可を記録し
   assert.deepEqual(short.permission.commands, [command]);
   assert.equal(short.escalations, undefined);
   assert.equal(short.history, undefined);
-  assert.match(prompt(state), /同じ文字列で再実行/);
+  assert.match(prompt(state, Date.now(), { executeApprovalReviewer: 'executor' }), /同じ文字列で再実行/);
   const previous = structuredClone(state);
   for (const commands of [[''], ['   '], ['other'], [42]]) {
     await assert.rejects(grant(state, { commands }, base), /コマンド/);
