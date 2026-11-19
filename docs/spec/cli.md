@@ -24,7 +24,7 @@
 
 ```powershell
 node src/cli.js start C:\path\to\target agent-docs\request.md
-node src/cli.js start-change C:\path\to\target sample-change --model review gpt-6.1-sol high --fallback review claude-opus-5-5 medium
+node src/cli.js start-change C:\path\to\target sample-change --model review gpt-6.2-sol high --fallback review claude-opus-5-5 medium
 node src/cli.js run <ID>
 node src/cli.js status <ID>
 node src/cli.js answer <ID> agent-docs\answer.md

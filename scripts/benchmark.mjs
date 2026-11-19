@@ -12,7 +12,7 @@ assert.ok(['control', 'improved'].includes(label), 'control または improved �
 const parent = join(root, 'agent-docs');
 mkdirSync(parent, { recursive: true });
 const dir = mkdtempSync(join(parent, `benchmark-${label}-`));
-const conditions = { model: 'gpt-6.1-sol', reasoning: 'low', platform: process.platform, node: process.version,
+const conditions = { model: 'gpt-6.2-sol', reasoning: 'low', platform: process.platform, node: process.version,
   codex: (await capture(resolveCodex(), ['--version'], root)).trim(),
   cache: '通常の共有キャッシュを使用。各回のキャッシュ入力を記録し、冷キャッシュとは扱わない。',
   requirement: readFileSync(join(root, 'test/fixtures/expenses/request.md'), 'utf8') };

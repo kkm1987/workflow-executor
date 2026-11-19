@@ -140,9 +140,9 @@ test('開始時と途中の上書きを保存し、変更は次の割り当て�
     async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 2, completedTasks: 0 }] }));
   state.stage = 'execute';
   const previous = assignment(state);
-  setModel(state, 'execute', 'gpt-6.1-sol', 'low', base);
+  setModel(state, 'execute', 'gpt-6.2-sol', 'low', base);
   assert.equal(previous.cli, 'codex');
-  assert.equal(assignment(load(state.id, base)).model, 'gpt-6.1-sol');
+  assert.equal(assignment(load(state.id, base)).model, 'gpt-6.2-sol');
   assert.throws(() => setModel(state, 'execute', 'claude-opus-5-5', 'low', base), /executeにはCodex/);
   assert.equal(assignment(load(state.id, base)).effort, 'low');
 });

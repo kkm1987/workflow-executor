@@ -216,7 +216,7 @@ test('計画審査の設定は既定・無効・Claude拒否を検証する', t 
   assert.equal(read(undefined).model, 'gpt-6-luna');
   assert.equal(read(undefined).effort, 'medium');
   assert.equal(read(null), null);
-  assert.equal(read({ model: 'gpt-6.1-sol', effort: 'low' }).model, 'gpt-6.1-sol');
+  assert.equal(read({ model: 'gpt-6.2-sol', effort: 'low' }).model, 'gpt-6.2-sol');
   assert.throws(() => read({ model: 'claude-sonnet-5-5' }), /Codexモデル/);
   assert.throws(() => read({ effort: 'low' }), /Codexモデル/);
 });

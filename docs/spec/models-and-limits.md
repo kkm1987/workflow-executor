@@ -7,7 +7,7 @@
 | 工程 | request | change |
 |---|---|---|
 | plan / prereview | `claude-opus-5-5` / medium | `claude-opus-5-5` / medium |
-| execute | `gpt-6.1-sol` / low | `gpt-6.1-sol` / low |
+| execute | `gpt-6.2-sol` / low | `gpt-6.2-sol` / low |
 | review | `gpt-6-luna` / high | `gpt-6-luna` / high |
 | acceptance | `gpt-6-luna` / high | `gpt-6-luna` / high |
 
