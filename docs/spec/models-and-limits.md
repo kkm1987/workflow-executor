@@ -17,6 +17,19 @@
 - **executeはCodex専用**。executeの通常モデルにClaudeを指定することと、executeの代替を指定することは拒否する。旧案件の通常モデルがClaudeの場合は`model <ID> execute <Codexのモデル>`で変更する。保存済みのexecuteの代替は選択時に無視する。
 - 昇格の計画審査（[permissions.md](permissions.md)）は`escalationReview`で指定したCodexモデルで行う（既定 `gpt-6-luna` / medium、`null`で無効）。
 
+## Codexのスキル
+
+`workflow.config.json`の`codexDisabledSkills`に無効化するスキル名を指定する。`"*"`は全工程に適用し、工程名（`plan`、`prereview`、`execute`、`review`、`acceptance`）の配列を加える。プラグイン配下のスキルも、プラグイン単位の無効化ではなく個別のスキル名で指定する。
+
+```json
+"codexDisabledSkills": {
+  "*": ["workflow-executor"],
+  "execute": ["openspec:kkm-openspec"]
+}
+```
+
+名前は英数字で始め、以降は英数字と `._:@-` を使える。不正な値は設定の読み込み時に拒否する。
+
 ## 代替モデル
 
 execute以外の工程は、`fallbacks.request|change.<工程>`に別CLIのモデルと推論レベルを1組指定できる。通常側と代替が同じCLIになる設定は拒否する。

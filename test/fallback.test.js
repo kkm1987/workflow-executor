@@ -53,6 +53,26 @@ test('設定の既定値・上書き・明示無効化を検証し、不正値�
   assert.throws(read, /executeにはCodex/);
 });
 
+test('Codexの無効スキルは共通と工程別を重複なく渡し、不正な設定を拒否する', t => {
+  const { dir, target, base } = fixture(t);
+  const state = create(target, '試験', base);
+  state.stage = 'execute';
+  const config = readConfig();
+  const file = join(dir, 'config.json');
+  const read = () => { writeFileSync(file, JSON.stringify(config)); return readConfig(file); };
+  const args = () => codexArgs(state, read(), base);
+  assert.ok(!args().some(arg => arg.startsWith('skills.config=')));
+  config.codexDisabledSkills = { '*': ['shared'], execute: ['shared', 'openspec:kkm-openspec'], review: ['review-only'] };
+  const setting = "skills.config=[{name='shared',enabled=false},{name='openspec:kkm-openspec',enabled=false}]";
+  const actual = args();
+  assert.ok(actual.includes(setting));
+  assert.equal(actual[actual.indexOf(setting) - 1], '-c');
+  for (const value of [null, [], { unknown: [] }, { execute: 'name' }, { '*': ["bad'name"] }, { execute: [3] }]) {
+    config.codexDisabledSkills = value;
+    assert.throws(read, /codexDisabledSkills/);
+  }
+});
+
 test('停止中の変更は保存・再読込でき、不正操作はメモリと保存状態と履歴を変えない', t => {
   const { target, base } = fixture(t);
   const state = create(target, '要求', base, undefined, { models: { plan: codex }, fallbacks: { plan: claude } });

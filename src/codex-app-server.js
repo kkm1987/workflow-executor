@@ -97,13 +97,17 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
         }
       } else if (id !== undefined) {
         if (message.error) {
+          if (id === 2 && thread.threadId && !probe && !interrupted && message.error.message?.includes('active writer')) {
+            send({ id: 5, method: 'thread/fork', params: thread });
+            continue;
+          }
           fail(new Error(probe ? `app-serverが承認判断者 ${thread.approvalsReviewer} の確認に失敗しました` : JSON.stringify(message.error)));
           return;
         }
         if (id === 1 && !interrupted) {
           send({ method: 'initialized', params: {} });
           send({ id: 2, method: thread.threadId ? 'thread/resume' : 'thread/start', params: thread });
-        } else if (id === 2) {
+        } else if (id === 2 || id === 5) {
           if (probe) {
             finished = true;
             if (message.result?.approvalsReviewer === thread.approvalsReviewer) complete();
@@ -111,6 +115,7 @@ export function codexSession(child, { thread, turn, emit, raw, output, complete,
             return;
           }
           threadId = message.result.thread.id;
+          if (id === 5) emit({ type: 'thread.forked', from: thread.threadId, thread_id: threadId });
           emit({ type: 'thread.started', thread_id: threadId });
           if (!interrupted) send({ id: 3, method: 'turn/start', params: { ...turn, threadId } });
         } else if (id === 3) {

@@ -39,6 +39,7 @@ test('store指定・宣言・ローカルのルートをCLIから保存し、解
 
 test('検証とアーカイブは保存したルートとstoreを使い、イベントへ記録する', async t => {
   const { state, store, base } = fixture(t);
+  state.attemptAssignment = { cli: 'codex' };
   const evidence = { openspec: { changedFiles: ['openspec/changes/sample/tasks.md'] } };
   await validatePrereview(state, result, [], async (cwd, args) => {
     assert.equal(cwd, store);
@@ -84,27 +85,47 @@ test('登録解除・ルート変更・Git管理外はモデル呼び出し0回�
   }
 });
 
+test('Claudeは許可外の差分を返し、未選定候補の差分と別ストアの証拠不足は拒否する', async t => {
+  const { state, target } = fixture(t);
+  state.attemptAssignment = { cli: 'claude' };
+  const selected = 'openspec/changes/sample/tasks.md';
+  const outside = ['src/outside.js', 'openspec/changes/unrelated/design.md'];
+  const validate = async () => {};
+  const evidence = { openspec: { changedFiles: [selected] } };
+  assert.deepEqual(await validatePrereview(state, result, outside, validate, evidence), outside);
+  await assert.rejects(validatePrereview(state, result, outside, validate), /証拠/);
+  state.openspec.root = target;
+  state.change = null;
+  state.candidates.push({ name: 'other' });
+  assert.deepEqual(await validatePrereview(state, result, [selected, ...outside], validate), outside);
+  await assert.rejects(validatePrereview(state, result, ['openspec\\changes\\other\\tasks.md'], async () => assert.fail()), /ディレクトリ外/);
+  state.attemptAssignment = { cli: 'codex' };
+  await assert.rejects(validatePrereview(state, result, outside, async () => assert.fail()), /ディレクトリ外/);
+});
+
 test('実行前レビューとapplyは対象changeだけを追加許可し、指示と要約にルートを含める', t => {
   const { state, store, base } = fixture(t);
   const path = join(store, 'openspec', 'changes', 'sample');
   for (const stage of ['prereview', 'execute']) {
     state.stage = stage;
     state.grants = { paths: [join(store, 'extra')] };
-    const codex = codexArgs(state, base);
-    assert.ok(codex.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([...state.grants.paths, path])}`));
+    const codex = codexArgs(state, undefined, base);
+    assert.ok(codex.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([...state.grants.paths, path, join(base, state.id, 'tmp'), join(base, 'cache', 'go-build')])}`));
     const claude = claudeArgs(state, 'session');
     assert.ok(claude.includes('--add-dir'));
     assert.ok(claude.includes(path));
     if (stage === 'prereview') assert.ok(claude.includes(`Write(${path.replaceAll('\\', '/')}/**)`));
   }
   assert.ok(prompt(state).includes(path));
-  assert.match(prompt(state), /--store "test-store"/);
+  assert.doesNotMatch(prompt(state), /--store/);
   assert.deepEqual(summary(state, base).openspec, state.openspec);
-  state.stage = 'prereview'; state.change = null; state.candidates.push({ name: 'second' });
+  state.stage = 'prereview';
+  assert.match(prompt(state), /--store "test-store"/);
+  state.change = null; state.candidates.push({ name: 'second' });
   assert.ok(claudeArgs(state, 'session').includes(join(store, 'openspec', 'changes', 'second')));
   state.openspec.root = state.target;
   delete state.grants;
-  assert.ok(!codexArgs(state, base).some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')));
+  assert.ok(codexArgs(state, undefined, base).includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([join(base, state.id, 'tmp'), join(base, 'cache', 'go-build')])}`));
   assert.ok(!claudeArgs(state, 'session').includes('--add-dir'));
 });
 
@@ -162,6 +183,7 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   }, () => 'codex'), async () => ({ limits: null, failure: null }));
   assert.equal(state.status, 'completed', state.error);
   assert.deepEqual(stages, ['prereview', 'execute', 'review', 'acceptance']);
+  assert.deepEqual(state.evidence.map(entry => entry.stage), ['prereview', 'execute']);
   assert.deepEqual(state.evidence[0].changedFiles, []);
   assert.deepEqual(state.evidence[0].openspec.changedFiles, ['openspec/changes/sample/tasks.md']);
   assert.deepEqual(state.evidence[1].changedFiles, ['greet.txt']);
@@ -171,7 +193,12 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
   for (const stage of ['review', 'acceptance']) {
     state.stage = stage;
     const context = JSON.parse(prompt(state).split('\n').at(-1));
-    assert.deepEqual(context.evidence, stage === 'review' ? state.evidence.filter(entry => entry.attempt > state.taskStartAttempt) : state.evidence);
+    const entries = stage === 'review' ? [state.evidence[1]] : state.evidence;
+    assert.deepEqual(context.evidence, entries.map(({ attempt, before, after, log, openspec }) => ({
+      attempt, before, after, log, openspec: { root: openspec.root, before: openspec.before, after: openspec.after },
+    })));
+    const specFile = 'openspec:openspec/changes/sample/tasks.md';
+    assert.deepEqual(context.changedFiles, { files: stage === 'review' ? ['greet.txt', specFile] : [specFile, 'greet.txt'], total: 2 });
   }
   await archive(state, base);
   assert.ok(!existsSync(change));

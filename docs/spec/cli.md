@@ -19,6 +19,7 @@
 | `evidence <ID> <JSONファイル>` | 停止中の案件へ外部証拠を登録 |
 | `archive <ID>` | `completed`のchangeを同期・アーカイブ |
 | `close <ID> [理由ファイル]` | 実行中以外の案件を終了 |
+| `clean [--cache]` | 実行中でない案件の`data/<ID>/tmp/`を削除する。`--cache`は実行中の案件がなければ`data/cache/`も削除し、あれば理由を表示する |
 
 ## 例
 

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { reserve } from './locking.js';
 import { resolve } from 'node:path';
-import { create, load, close, answer, approve, approvalSelection, grant, dataRoot, list, summary, brief, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
+import { create, load, close, clean, answer, approve, approvalSelection, grant, dataRoot, list, summary, brief, setModel, setFallback, retry, registerEvidence, dashboard } from './workflow.js';
 import { step, run } from './executor.js';
 import { startChange, archive } from './changes.js';
 
@@ -16,6 +16,7 @@ const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   fallback <ID> <工程> --disable
   archive <ID>                 completedのchangeを同期・アーカイブ
   close <ID> [理由ファイル]       実行中以外の案件を終了
+  clean [--cache]                停止中の案件の一時ファイルを削除
   step <ID>                     次の1工程を実行
   run <ID>                      回答待ち・失敗・完了まで工程を進める
   answer <ID> <回答ファイル> [--inquiry]  回答を保存（--inquiryは確認の質問）
@@ -31,6 +32,11 @@ let release;
 try {
   if (!command || command === '--help') {
     console.log(help);
+  } else if (command === 'clean') {
+    if (args.length && !(args.length === 1 && args[0] === '--cache')) throw new Error(help);
+    const result = clean(args[0] === '--cache');
+    console.log(JSON.stringify(result, null, 2));
+    if (result.failures.length) process.exitCode = 1;
   } else {
     if (!['start', 'start-change', 'model', 'fallback', 'archive', 'close', 'step', 'run', 'answer', 'approve', 'grant', 'retry', 'status', 'evidence'].includes(command)) throw new Error(help);
     const counts = { step: 1, run: 1, retry: 1, archive: 1, evidence: 2 };

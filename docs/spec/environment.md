@@ -10,6 +10,7 @@
 
 - Codexの新規実行・セッション再開は`codex app-server`のstdio JSON-RPCを使う。承認方針はexecuteだけ`on-request`、他の工程と確認の質問は`never`とする（昇格の判断者は[permissions.md](permissions.md)）。
 - WindowsのCodex実行ファイルは、`%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe`のうち更新日時が最新のもの、次に`PATH`の`codex`を探す。解決したパスを実行前確認・本実行・利用枠取得で共有し、パスと版を実行前確認の記録へ残す。
+- Codexの各工程を起動する前に、実行器が`data/<ID>/tmp/`と`data/cache/go-build`を作る。子プロセスの`TMP`・`TEMP`・`GOTMPDIR`には案件の一時領域、`GOCACHE`には案件間で共有するGoキャッシュを渡す。書き込み可能なCodex工程では両方をsandboxの書き込み先に加える。
 
 ## Windowsのサンドボックス
 

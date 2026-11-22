@@ -30,6 +30,12 @@ export function readConfig(path = new URL('../workflow.config.json', import.meta
   const config = JSON.parse(readFileSync(path, 'utf8'));
   if (config.executeApprovalReviewer === undefined) config.executeApprovalReviewer = 'auto-review';
   if (!['auto-review', 'executor'].includes(config.executeApprovalReviewer)) throw new Error('executeApprovalReviewerの指定が不正です');
+  const disabled = config.codexDisabledSkills;
+  if (disabled !== undefined && (!disabled || typeof disabled !== 'object' || Array.isArray(disabled) ||
+    Object.entries(disabled).some(([stage, names]) => !['*', 'plan', ...stagesFor('change')].includes(stage) ||
+      !Array.isArray(names) || names.some(name => typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:@-]*$/.test(name))))) {
+    throw new Error('codexDisabledSkillsの指定が不正です');
+  }
   const localPath = join(dirname(path instanceof URL ? fileURLToPath(path) : path), 'workflow.config.local.json');
   let local;
   try {

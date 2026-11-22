@@ -8,17 +8,58 @@ import { usage } from '../src/metrics.js';
 import { execItem, codexSession } from '../src/codex-app-server.js';
 import { fakeCodex } from './fixtures/codex.js';
 
-function fixture(t, body, onResume) {
+function fixture(t, body, onResume, onThread) {
   const dir = mkdtempSync(join(root, 'agent-docs', 'rpc-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const target = join(dir, 'target'); mkdirSync(target);
   const state = create(target, '試験', join(dir, 'data'));
   state.stage = 'review';
-  const fake = join(target, 'fake.cjs'); fakeCodex(fake, body, onResume);
+  const fake = join(target, 'fake.cjs'); fakeCodex(fake, body, onResume, onThread);
   const attempt = join(dir, 'attempt'); mkdirSync(attempt);
   return { state, attempt, run: () => runAgent(state, attempt, process.execPath, [fake]) };
 }
 const lines = (attempt, file) => readFileSync(join(attempt, file), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+
+for (const [resumeError, forkError] of [
+  ['already has an active writer', null],
+  ['thread not found', null],
+  ['already has an active writer', 'fork failed'],
+]) test(`resume拒否時のfork（${forkError ?? resumeError}）`, async t => {
+  const { state, attempt, run } = fixture(t, 'finish({ summary: input });', '', `
+    if (message.method === 'thread/resume') {
+      send({ id: message.id, error: { message: ${JSON.stringify(resumeError)} } });
+      return;
+    }
+    if (message.method === 'thread/fork') {
+      send({ id: message.id, ${forkError
+        ? `error: { message: ${JSON.stringify(forkError)} }`
+        : "result: { thread: { id: 'forked' } }"} });
+      return;
+    }
+  `);
+  state.attemptAssignment = { cli: 'codex', model: 'gpt-6-luna', effort: 'high' };
+  state.session = { ...state.attemptAssignment, stage: 'review', sessionId: 'old' };
+  state.answers = [{ answer: '回答' }];
+  const shouldFork = resumeError.includes('active writer');
+  if (!shouldFork || forkError) await assert.rejects(run(), new RegExp(forkError ?? resumeError));
+  else assert.deepEqual(await run(), { summary: '回答' });
+
+  const sent = lines(attempt, 'codex-rpc.jsonl').filter(entry => entry.direction === 'send').map(entry => JSON.parse(entry.line));
+  const fork = sent.find(entry => entry.method === 'thread/fork');
+  assert.equal(Boolean(fork), shouldFork);
+  if (fork) assert.deepEqual(fork.params, sent.find(entry => entry.method === 'thread/resume').params);
+  const turn = sent.find(entry => entry.method === 'turn/start');
+  if (shouldFork && !forkError) {
+    assert.equal(turn.params.threadId, 'forked');
+    assert.deepEqual(lines(attempt, 'codex.jsonl').slice(0, 2), [
+      { type: 'thread.forked', from: 'old', thread_id: 'forked' },
+      { type: 'thread.started', thread_id: 'forked' },
+    ]);
+    const invocation = JSON.parse(readFileSync(join(attempt, 'invocation.json'), 'utf8'));
+    assert.equal(invocation.sessionId, 'forked');
+    assert.equal(invocation.forkedFrom, 'old');
+  } else assert.equal(turn, undefined);
+});
 
 test('自動レビュー中に実行器に届いた承認は、許可に一致しても拒否して記録する', async t => {
   const method = 'item/commandExecution/requestApproval';

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -24,10 +24,13 @@ test('終了は理由・前状態・履歴を保持し、実行中と終了済�
   const attempt = join(base, state.id, 'attempt-0001'); mkdirSync(attempt);
   writeFileSync(join(attempt, 'result.json'), '{"summary":"途中の結果"}');
   writeFileSync(join(target, '途中.txt'), '変更を保持');
+  const tmp = join(base, state.id, 'tmp');
+  mkdirSync(tmp);
   save(state, base);
   const history = summary(state, base).history;
   close(state, '別IDでやり直す', base);
   assert.equal(load(state.id, base).status, 'closed');
+  assert.ok(!existsSync(tmp));
   assert.equal(state.closed.from, 'failed');
   assert.equal(state.closed.reason, '別IDでやり直す');
   assert.ok(Number.isFinite(Date.parse(state.closed.at)));
@@ -44,6 +47,39 @@ test('終了は理由・前状態・履歴を保持し、実行中と終了済�
     assert.throws(() => close(state, '', base));
     assert.equal(readFileSync(join(base, state.id, 'state.json'), 'utf8'), before);
   }
+});
+
+test('一時領域の削除に失敗しても終了し、失敗イベントを残す', t => {
+  const { state, base } = fixture(t);
+  const tmp = join(base, state.id, 'tmp');
+  mkdirSync(tmp);
+  const remove = fs.rmSync;
+  fs.rmSync = (path, options) => {
+    if (path === tmp) throw new Error('一時領域を使用中');
+    return remove(path, options);
+  };
+  syncBuiltinESMExports();
+  try { close(state, '', base); }
+  finally { fs.rmSync = remove; syncBuiltinESMExports(); }
+  assert.equal(load(state.id, base).status, 'closed');
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).detail, { error: '一時領域を使用中' });
+  assert.equal(events.at(-1).type, 'tmp_cleanup_failed');
+});
+
+test('最終確認の合格で一時領域だけを削除する', async t => {
+  const { state, base } = fixture(t);
+  state.stage = 'acceptance';
+  const tmp = join(base, state.id, 'tmp');
+  const cache = join(base, 'cache', 'go-build');
+  for (const path of [tmp, cache]) mkdirSync(path, { recursive: true });
+  await step(state, async () => ({
+    outcome: 'ok', returnTo: 'none', cause: '', summary: '確認済み', question: '', tasks: [],
+    report: { scope: '最終確認', decisions: [], verification: '確認済み', remaining: 'なし' },
+  }), base, async () => ({ ok: true }), async () => ({ limits: null, failure: null }));
+  assert.equal(load(state.id, base).status, 'completed');
+  assert.ok(!existsSync(tmp));
+  assert.ok(existsSync(cache));
 });
 
 test('終了した案件のすべての変更操作は状態とイベントを変更せず拒否する', async t => {
@@ -122,6 +158,23 @@ test('CLIの終了と一覧・全件・ID指定、Markdownと公開要約の除�
   const answered = load(waiting.id, base);
   assert.equal(answered.answers.at(-1).inquiry, true);
   assert.equal(answered.question, '元の質問');
+  answered.status = 'running';
+  save(answered, base);
+  const activeTmp = join(base, waiting.id, 'tmp');
+  const closedTmp = join(base, state.id, 'tmp');
+  const cache = join(base, 'cache', 'go-build');
+  for (const path of [activeTmp, closedTmp, cache]) mkdirSync(path, { recursive: true });
+  assert.match(cli('clean', '--cache').cacheSkipped, /実行中/);
+  assert.ok(existsSync(activeTmp));
+  assert.ok(!existsSync(closedTmp));
+  assert.ok(existsSync(cache));
+  answered.status = 'waiting';
+  save(answered, base);
+  assert.deepEqual(cli('clean'), { failures: [] });
+  assert.ok(!existsSync(activeTmp));
+  assert.ok(existsSync(cache));
+  assert.deepEqual(cli('clean', '--cache'), { failures: [] });
+  assert.ok(!existsSync(cache));
   assert.equal(cli('close', waiting.id).closed.reason, '');
   assert.deepEqual(cli('status'), []);
 });

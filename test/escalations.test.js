@@ -20,7 +20,7 @@ test('Codexの昇格の判断者はexecuteの作業だけで切り替わる', ()
   for (const executeApprovalReviewer of ['auto-review', 'executor']) {
     for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
       for (const inquiry of [false, true]) {
-        const state = { stage, answers: [{ inquiry }], attemptAssignment: { cli: 'codex' } };
+        const state = { id: '00000000-0000-0000-0000-000000000001', stage, answers: [{ inquiry }], attemptAssignment: { cli: 'codex' } };
         const config = { executeApprovalReviewer };
         const active = stage === 'execute' && !inquiry;
         const policy = active ? 'on-request' : 'never';

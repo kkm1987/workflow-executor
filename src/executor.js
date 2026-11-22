@@ -2,13 +2,13 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope, executePermissions, escalationCounts } from './workflow.js';
+import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope, executePermissions, escalationCounts, temporaryDirectory } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { tokenMetrics, performanceReport } from './metrics.js';
 import { assignment, attemptAssignment, fallbackAssignment, validateAssignments, readConfig, codexApproval, AUTO_APPROVAL_REVIEWER } from './config.js';
 import { resolveCodex, spawnCommand, windowsSandboxArgs } from './commands.js';
-import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, writablePaths, taskGate } from './changes.js';
+import { validatePrereview, openSpecRoot, separateOpenSpec, changeDirectories, writablePaths, taskGate, goBuildCache } from './changes.js';
 import { rateLimits, insufficient, limitError, rateLimitsFailures } from './limits.js';
 import { evidenceSelection } from './external-evidence.js';
 import { activity, eventStream } from './activity.js';
@@ -55,17 +55,20 @@ export function codexThread(state, config) {
 
 export { writablePaths };
 
-export function codexArgs(state, config) {
+export function codexArgs(state, config = readConfig(), base = dataRoot) {
   const value = attemptAssignment(state);
   const mode = codexSandbox(state);
-  const paths = writablePaths(state);
+  const paths = mode === 'workspace-write' ? writablePaths(state, base) : [];
+  const disabled = config.codexDisabledSkills;
+  const skills = [...new Set([...(disabled?.['*'] ?? []), ...(disabled?.[state.stage] ?? [])])];
   const { approvalPolicy, approvalsReviewer } = codexApproval(state, config);
   return ['app-server',
     ...(value.model ? ['-c', `model=${JSON.stringify(value.model)}`] : []),
     ...(value.effort ? ['-c', `model_reasoning_effort="${value.effort}"`] : []),
     ...windowsSandboxArgs(),
+    ...(skills.length ? ['-c', `skills.config=[${skills.map(name => `{name='${name}',enabled=false}`).join(',')}]`] : []),
     ...(mode === 'workspace-write' && state.grants?.network ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
-    ...(mode === 'workspace-write' && paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
+    ...(paths.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(paths)}`] : []),
     '-c', `sandbox_mode="${mode}"`, '-c', `approval_policy="${approvalPolicy}"`, '-c', `approvals_reviewer="${approvalsReviewer}"`];
 }
 
@@ -77,9 +80,9 @@ export function claudeArgs(state, sessionId) {
   if (!inquiry && state.stage === 'prereview') {
     tools.push('Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(ls:*)');
     tools.push('Bash(openspec list:*)', 'Bash(openspec show:*)', 'Bash(openspec status:*)', 'Bash(openspec validate:*)');
-    for (const name of state.change ? [state.change] : state.candidates.map(item => item.name)) {
-      const path = `${openSpecRoot(state).root.replaceAll('\\', '/')}/openspec/changes/${name}/**`;
-      tools.push(`Edit(${path})`, `Write(${path})`);
+    for (const directory of changeDirectories(state)) {
+      const path = directory.replaceAll('\\', '/');
+      tools.push(`Edit(${path}/**)`, `Write(${path}/**)`);
     }
   }
   const paths = !inquiry && separateOpenSpec(state) ? changeDirectories(state) : [];
@@ -102,7 +105,7 @@ function reviewer(state, dir, command, prefix, signal, { escalationReview: setti
   };
 }
 
-async function invokeAgent(state, dir, command, prefix, config) {
+async function invokeAgent(state, dir, command, prefix, config, base) {
   const value = attemptAssignment(state);
   command ??= value.cli === 'codex' ? state.executables?.codex ?? resolveCodex() : state.executables?.claude ?? 'claude';
   const sessionId = value.cli === 'claude' ? resumeSession(state)?.sessionId ?? randomUUID() : null;
@@ -124,24 +127,32 @@ async function invokeAgent(state, dir, command, prefix, config) {
     escalations.push(entry);
     state.evidence ??= [];
     let evidence = state.evidence.findLast(item => item.attempt === state.attempts);
-    if (!evidence) { evidence = { attempt: state.attempts }; state.evidence.push(evidence); }
+    if (!evidence) { evidence = { attempt: state.attempts, stage: state.stage }; state.evidence.push(evidence); }
     evidence.escalations = escalations;
   };
   const receive = eventStream(entry => {
     const latest = activity(entry, value.cli, new Date().toISOString(), tools);
     if (latest) state.activity = latest;
     if (entry.type === 'thread.started') metadata.sessionId = entry.thread_id;
+    if (entry.type === 'thread.forked') metadata.forkedFrom = entry.from;
     if (entry.type === 'turn.failed' || entry.type === 'error') failure ??= new Error(JSON.stringify(entry));
     if (value.cli === 'claude' && entry.type === 'result') finalOutput = entry;
   });
   try {
+    let env;
+    if (value.cli === 'codex') {
+      const tmp = temporaryDirectory(state, base);
+      const cache = goBuildCache(base);
+      for (const path of [tmp, cache]) mkdirSync(path, { recursive: true });
+      env = { ...process.env, TMP: tmp, TEMP: tmp, GOTMPDIR: tmp, GOCACHE: cache };
+    }
     stdout = openSync(join(dir, value.cli === 'codex' ? 'codex.jsonl' : 'claude.jsonl'), 'w');
     stderr = openSync(join(dir, 'stderr.log'), 'w');
     if (value.cli === 'codex') rpc = openSync(join(dir, 'codex-rpc.jsonl'), 'w');
     await new Promise((resolve, reject) => {
-      const args = value.cli === 'codex' ? codexArgs(state, config) : claudeArgs(state, sessionId);
+      const args = value.cli === 'codex' ? codexArgs(state, config, base) : claudeArgs(state, sessionId);
       const child = spawnCommand(command, [...prefix, ...args], {
-        cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true,
+        cwd: state.target, stdio: ['pipe', 'pipe', stderr], windowsHide: true, env,
       });
       let interrupted = false;
       let killed = false;
@@ -266,12 +277,12 @@ async function invokeAgent(state, dir, command, prefix, config) {
   return result;
 }
 
-export async function runAgent(state, dir, command, prefix = [], config = readConfig()) {
+export async function runAgent(state, dir, command, prefix = [], config = readConfig(), base = dataRoot) {
   let evidence;
   let before;
   let specBefore;
   if (['execute', 'prereview'].includes(state.stage)) {
-    evidence = { attempt: state.attempts, before: join(dir, 'before.json'), after: join(dir, 'after.json'),
+    evidence = { attempt: state.attempts, stage: state.stage, before: join(dir, 'before.json'), after: join(dir, 'after.json'),
       log: join(dir, attemptAssignment(state).cli === 'claude' ? 'claude.jsonl' : 'codex.jsonl') };
     before = await snapshot(state.target, evidence.before);
     if (separateOpenSpec(state)) {
@@ -284,7 +295,7 @@ export async function runAgent(state, dir, command, prefix = [], config = readCo
   }
   let result;
   let failure;
-  try { result = await invokeAgent(state, dir, command, prefix, config); }
+  try { result = await invokeAgent(state, dir, command, prefix, config, base); }
   catch (error) { failure = error; }
   finally {
     if (evidence) {
@@ -454,14 +465,16 @@ async function executeStep(state, runner, base, limits, validate, check, checked
     }
   }, 10_000);
   try {
-    let result = await (runner === runCodex ? runner(state, dir, undefined, [], config) : runner(state, dir));
+    let result = await (runner === runCodex ? runner(state, dir, undefined, [], config, base) : runner(state, dir));
     if (heartbeatError) throw heartbeatError;
     writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2));
     try { Object.assign(metric, JSON.parse(readFileSync(join(dir, 'invocation.json'), 'utf8'))); } catch {}
     if (!inquiry && state.stage === 'prereview') {
       const evidence = state.evidence?.findLast(entry => entry.attempt === state.attempts);
-      try { await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence); }
+      let files;
+      try { files = await validate(state, result, evidence?.changedFiles ?? [], undefined, evidence); }
       catch (error) { throw Object.assign(error, { kind: 'invalid' }); }
+      if (files?.length) event(state, 'external_change', { attempt: state.attempts, files }, base);
     }
     if (result?.outcome === 'error' && limitError(result.summary)) {
       if (!inquiry) validateResult(result, state.stage, state);
@@ -474,7 +487,7 @@ async function executeStep(state, runner, base, limits, validate, check, checked
       if (problems.length) result = { ...result, outcome: 'revise', summary: `tasks.mdの確認に失敗しました:\n${problems.join('\n')}` };
     }
     if (inquiry) resolveInquiry(state, result);
-    else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base) });
+    else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base), base });
     if (state.status === 'failed') {
       failure = Object.assign(new Error(result.summary), { kind: `reported-${result.cause}` });
     }

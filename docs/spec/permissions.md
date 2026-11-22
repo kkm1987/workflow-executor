@@ -5,8 +5,8 @@
 | 工程 | 書き込み |
 |---|---|
 | plan / review / acceptance | 不可（読み取り専用） |
-| prereview | 選定したchange内だけ |
-| execute | 開発対象と許可済みパス（sandbox内） |
+| prereview | 選定したchange内。Codexは一時領域とGoキャッシュも書き込み可能 |
+| execute | 開発対象、許可済みパス、一時領域、Goキャッシュ（sandbox内） |
 
 ネットワークと作業ディレクトリ外のパスは、エージェントが`outcome=permission`で`permission.network`・`permission.paths`を要求し、`grant <ID> [--network] [--path <絶対パス>]...`で許可する。許可は案件内に保存する。
 

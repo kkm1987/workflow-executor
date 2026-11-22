@@ -4,9 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, resolveInquiry, validateResult, lock, prompt, summary, brief, list, dashboard } from '../src/workflow.js';
+import { root, create, load, save, answer, approve, retry, registerEvidence, grant, advance, resolveInquiry, validateResult, lock, prompt, summarizeEvidence, summary, brief, list, dashboard } from '../src/workflow.js';
 import { step as nativeStep, run as nativeRun, codexArgs, codexThread, runCodex, inputFor, claudeArgs } from '../src/executor.js';
 import { fakeCodex } from './fixtures/codex.js';
+import { largeStageEvidence } from './fixtures/stage-evidence.js';
 import { attemptAssignment } from '../src/config.js';
 import { preflight as nativePreflight, checkCommand, checkGrantAccess } from '../src/preflight.js';
 import { usage, performanceReport } from '../src/metrics.js';
@@ -31,6 +32,29 @@ function fixture(t) {
   return { base, target, state: create(target, '入力を検証して保存する', base) };
 }
 const task = { title: '入力検証', acceptance: '空の入力は保存されない' };
+
+test('証拠を変更せず、試行の記録と判断件数、変更ファイルの和集合を返す', () => {
+  const specFile = 'openspec/changes/sample/tasks.md';
+  const files = [specFile, ...Array.from({ length: 2999 }, (_, index) => `src/file-${index}.js`)];
+  const before = 'attempt-0001/before.json';
+  const after = 'attempt-0001/after.json';
+  const log = 'attempt-0001/codex.jsonl';
+  const openspec = { root: '/store', before: 'attempt-0001/openspec-before.json', after: 'attempt-0001/openspec-after.json' };
+  const state = { evidence: [
+    { attempt: 1, before, after, log, changedFiles: [specFile], openspec: { ...openspec, store: 'sample-store', changedFiles: [specFile] },
+      escalations: Array.from({ length: 40 }, (_, index) => ({ decision: index < 31 ? 'accept' : 'decline', command: 'コマンド全文', reason: '理由の全文' })) },
+    { attempt: 2, before, after, log, changedFiles: files, openspec: { ...openspec, changedFiles: [specFile] } },
+  ] };
+  const original = structuredClone(state.evidence);
+  assert.deepEqual(summarizeEvidence(state.evidence), {
+    evidence: [
+      { attempt: 1, before, after, log, openspec, escalations: { total: 40, accept: 31, decline: 9 } },
+      { attempt: 2, before, after, log, openspec },
+    ],
+    changedFiles: { files: [specFile, `openspec:${specFile}`, ...files.slice(1, 99)], total: 3001 },
+  });
+  assert.deepEqual(state.evidence, original);
+});
 
 test('executeは判断者に合った指示を受け、所有者の許可を再開時も自動レビューへ伝える', async t => {
   const { state, base } = fixture(t);
@@ -148,7 +172,10 @@ test('検証の不具合は範囲内で直すか実行前レビューへ戻す�
   assert.match(input, /changeの範囲外、design・spec・tasksの変更が必要、または原因を判断できない場合は、tasks.mdを編集せずoutcome=replan/);
   assert.match(input, /失敗の場所、単独と全体での再現の有無、ログの保存先、このchangeの変更ファイルとの重なり/);
   assert.match(input, /所有者が計画の見直しを指示した場合も同様/);
-  assert.deepEqual(JSON.parse(input.split('\n').at(-1)).evidence, state.evidence);
+  assert.match(input, /原因の判断には入力のchangedFiles（この案件のexecuteで変わったファイル）も使う/);
+  const context = JSON.parse(input.split('\n').at(-1));
+  assert.deepEqual(context.evidence, []);
+  assert.deepEqual(context.changedFiles, { files: ['src/feature.js'], total: 1 });
 });
 
 test('実行前レビューは戻された不具合を解析し、計画の更新・質問・errorで応じるよう指示する', t => {
@@ -694,8 +721,9 @@ test('承認計画へのanswerは回答を保存して実行前レビューへ�
   assert.equal(state.approval.pending[0].id, 'A9');
 });
 
-test('approval結果は実装だけで有効で、完了タスクと承認を保持し上限で停止する', async t => {
+test('approval結果は実装だけで有効で、完了タスクと承認を保持し手戻りに数えない', async t => {
   const { state, base } = fixture(t);
+  state.kind = 'change';
   state.stage = 'prereview';
   advance(state, prereviewResult(approvalItems));
   await approve(state, '', base);
@@ -711,9 +739,9 @@ test('approval結果は実装だけで有効で、完了タスクと承認を保
   for (let count = 1; count <= 4; count++) {
     state.stage = 'execute';
     advance(state, result);
-    assert.equal(state.revisions, count);
+    assert.equal(state.revisions, 0);
     assert.equal(state.stage, 'prereview');
-    assert.equal(state.status, count > 3 ? 'blocked' : 'ready');
+    assert.equal(state.status, 'ready');
     assert.deepEqual(state.tasks, tasks);
     assert.deepEqual(state.approval, approval);
     assert.equal(state.lastResult, result.summary);
@@ -1021,11 +1049,14 @@ test('差し戻しは未完了タスクを再定義し、完了済み成果を�
   assert.equal(state.tasks[1].title, '修正');
 });
 
-test('手戻りが上限を超えると停止する', t => {
+test('計画への差し戻しと最終確認の差し戻しが合計4回になると停止する', t => {
   const { state } = fixture(t);
+  state.kind = 'change';
   for (let i = 0; i < 4; i++) {
-    state.stage = 'acceptance';
-    advance(state, { ...revise, returnTo: 'none' });
+    state.stage = i % 2 ? 'acceptance' : 'review';
+    advance(state, state.stage === 'review' ? revise : { ...revise, returnTo: 'none' });
+    assert.equal(state.stage, 'prereview');
+    assert.equal(state.status, i < 3 ? 'ready' : 'blocked');
   }
   assert.equal(state.status, 'blocked');
   assert.equal(state.revisions, 4);
@@ -1283,7 +1314,8 @@ test('実装前後の記録で新規・変更・削除と既存の変更を区�
   state.evidence = [{ before: join(base, 'before.json'), after: join(base, 'after.json'), changedFiles: changedFiles(before, after) }];
   state.stage = 'review';
   const context = JSON.parse(prompt(state).split('\n').at(-1));
-  assert.deepEqual(context.evidence[0].changedFiles.sort(), ['deleted.txt', 'edited.txt', 'new.txt']);
+  assert.deepEqual(context.changedFiles.files.sort(), ['deleted.txt', 'edited.txt', 'new.txt']);
+  assert.equal(context.changedFiles.total, 3);
 });
 
 test('実装の実行で記録した変更ファイルが保存され、次のレビューへ渡る', async t => {
@@ -1303,7 +1335,46 @@ test('実装の実行で記録した変更ファイルが保存され、次の�
   assert.ok(existsSync(saved.evidence[0].after));
   assert.equal(saved.evidence[0].log, join(base, state.id, 'attempt-0001', 'codex.jsonl'));
   const reviewContext = JSON.parse(prompt(saved).split('\n').at(-1));
-  assert.deepEqual(reviewContext.evidence[0].changedFiles, ['feature.js']);
+  assert.deepEqual(reviewContext.evidence[0], {
+    attempt: 1, before: saved.evidence[0].before, after: saved.evidence[0].after, log: saved.evidence[0].log,
+  });
+  assert.deepEqual(reviewContext.changedFiles, { files: ['feature.js'], total: 1 });
+});
+
+test('reviewの入力は、前後の記録とログのパスを残し、3000件の変更ファイルを100件に収める', t => {
+  const { state } = fixture(t);
+  const entry = { attempt: 1, before: 'before.json', after: 'after.json', log: 'codex.jsonl' };
+  const files = Array.from({ length: 3000 }, (_, index) => `src/file-${index}.js`);
+  Object.assign(state, { stage: 'review', evidence: [{ ...entry, changedFiles: files }] });
+  const input = prompt(state);
+  assert.match(input, /evidenceの実装前後の記録とchangedFilesを使い/);
+  assert.match(input, /evidence\.logのCLI実行ログ/);
+  const context = JSON.parse(input.split('\n').at(-1));
+  assert.deepEqual(context.evidence, [entry]);
+  assert.deepEqual(context.changedFiles, { files: files.slice(0, 100), total: 3000 });
+  assert.deepEqual(state.evidence, [{ ...entry, changedFiles: files }]);
+});
+
+test('20試行の大量の証拠があっても全工程の入力は要求と回答の本文を除いて2万字以下になる', t => {
+  const { state } = fixture(t);
+  Object.assign(state, {
+    requirement: '要求の本文'.repeat(5000), answers: [{ answer: '回答の本文'.repeat(5000) }],
+    tasks: [{ ...task, status: 'pending' }], taskStartAttempt: 0, evidence: largeStageEvidence(),
+  });
+  for (const kind of ['request', 'change']) {
+    const planningStage = kind === 'request' ? 'plan' : 'prereview';
+    for (const stage of [planningStage, 'execute', 'review', 'acceptance']) {
+      const input = prompt({ ...state, kind, stage, change: kind === 'change' ? 'sample' : undefined });
+      const jsonStart = input.lastIndexOf('\n') + 1;
+      const context = JSON.parse(input.slice(jsonStart));
+      assert.equal(context.evidence.length, kind === 'change' && stage === 'execute' ? 0 : 20);
+      assert.equal(context.changedFiles.total, 60000);
+      context.requirement = '';
+      for (const answer of context.answers) answer.answer = '';
+      const length = jsonStart + JSON.stringify(context).length;
+      assert.ok(length <= 20000, `${kind}/${stage}の入力は${length}字`);
+    }
+  }
 });
 
 test('実装が途中で失敗しても変更前後の記録と元のエラーを保持する', async t => {
@@ -1378,25 +1449,55 @@ test('returnToはreviewのreviseだけが差し戻し先を指定できる', () 
   for (const returnTo of ['execute', 'prereview']) assert.equal(validateResult({ ...revise, returnTo }, 'review').returnTo, returnTo);
 });
 
-test('実装差し戻しはtargetと開始試行を保ち、計画差し戻しと上限を共有する', t => {
-  const { state } = fixture(t);
+test('同じタスクの実装差し戻しは4回目で回答待ちになり、指示を回答すると回数が戻る', t => {
+  const { state, base } = fixture(t);
   state.attempts = 1;
   advance(state, ok([task]));
   const input = () => JSON.parse(prompt(state).split('\n').at(-1));
   const expected = input().target;
-  for (const returnTo of ['execute', 'prereview', 'execute', 'prereview']) {
-    state.stage = 'review';
-    advance(state, { ...revise, returnTo });
+  for (let count = 1; count <= 4; count++) {
+    advance(state, ok());
+    advance(state, { ...revise, returnTo: 'execute' });
     assert.equal(state.tasks[0].status, 'pending');
-    assert.equal(state.stage, returnTo === 'execute' ? 'execute' : 'plan');
+    assert.equal(state.tasks[0].revisions, count);
+    assert.equal(state.stage, 'execute');
+    assert.equal(state.status, count < 4 ? 'ready' : 'waiting');
     assert.equal(input().previous, revise.summary);
-    if (returnTo === 'execute') {
-      assert.deepEqual(input().target, expected);
-      assert.equal(state.taskStartAttempt, 1);
-    }
+    assert.deepEqual(input().target, expected);
+    assert.equal(state.taskStartAttempt, 1);
   }
-  assert.equal(state.revisions, 4);
-  assert.equal(state.status, 'blocked');
+  assert.equal(state.revisions, 0);
+  for (const text of [revise.summary, '指示を加えて続行', '計画見直し', 'close']) assert.ok(state.question.includes(text));
+  answer(state, '差し戻しの根拠は？', base, true);
+  assert.equal(state.tasks[0].revisions, 4);
+  state.status = 'waiting';
+  answer(state, '指摘された入力条件を追加する', base);
+  assert.equal(state.tasks[0].revisions, undefined);
+  assert.equal(state.status, 'ready');
+  assert.equal(state.stage, 'execute');
+  assert.equal(input().answers.at(-1).answer, '指摘された入力条件を追加する');
+  advance(state, ok());
+  advance(state, { ...revise, returnTo: 'execute' });
+  assert.equal(state.tasks[0].revisions, 1);
+});
+
+test('承認要求の後に別々の3タスクが実装差し戻しを受けても止まらない', t => {
+  const { state } = fixture(t);
+  const tasks = Array.from({ length: 3 }, (_, i) => ({ ...task, title: `タスク ${i + 1}` }));
+  advance(state, ok(tasks));
+  advance(state, { ...ok(), outcome: 'approval' });
+  assert.equal(state.stage, 'plan');
+  advance(state, ok(tasks));
+  for (const [index] of tasks.entries()) {
+    advance(state, ok());
+    advance(state, { ...revise, returnTo: 'execute' });
+    assert.equal(state.status, 'ready');
+    assert.equal(state.tasks[index].revisions, 1);
+    advance(state, ok());
+    advance(state, ok());
+  }
+  assert.equal(state.stage, 'acceptance');
+  assert.equal(state.revisions, 0);
 });
 
 test('executeとreviewの証拠はタスク開始以降のpartialと再実装を含み、次タスクとは分離する', t => {

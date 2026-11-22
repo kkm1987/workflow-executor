@@ -6,11 +6,11 @@
 
 | パス | 内容 |
 |---|---|
-| `data/<ID>/state.json` | 再開用の状態 |
-| `data/<ID>/events.jsonl` | 工程ログ（選択・昇格・移行などのイベント） |
+| `data/<ID>/state.json` | 再開用の状態。`evidence`に変更ファイルと昇格の詳細を全件保存する |
+| `data/<ID>/events.jsonl` | 工程ログ。Claudeの実行前レビューで観測した書き込み許可外の差分は`external_change`に`attempt`と`files`を記録する。一時領域の削除失敗は`tmp_cleanup_failed`に記録する |
 | `data/<ID>/preflight-*.json` | 実行前確認の結果 |
 | `data/<ID>/performance.json` | 試行一覧と集計 |
-| `data/<ID>/attempt-XXXX/invocation.json` | 担当・対象・最終活動 |
+| `data/<ID>/attempt-XXXX/invocation.json` | 担当・対象・最終活動・昇格の詳細 |
 | `attempt-XXXX/result.json` | 工程報告 |
 | `attempt-XXXX/metrics.json` | 成否・エラーと計測 |
 | `attempt-XXXX/codex.jsonl` | Codexの通知（従来のexec形式へ変換） |

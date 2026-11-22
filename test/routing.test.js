@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync, utimesSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { root, create, load, setModel, answer, retry, advance, summary, save } from '../src/workflow.js';
 import { readConfig, validateModel, assignment } from '../src/config.js';
@@ -11,6 +11,7 @@ import { preflight, checkGrantAccess } from '../src/preflight.js';
 import { parseCodexLimits, parseClaudeLimits, insufficient, limitError } from '../src/limits.js';
 import { usage, performanceReport } from '../src/metrics.js';
 import { fakeCodex } from './fixtures/codex.js';
+import { execFileSync } from 'node:child_process';
 
 const report = { scope: '入力検証の実装と受け入れ条件', decisions: [], verification: '試験で確認済み', remaining: 'なし' };
 const passed = async () => ({ ok: true });
@@ -18,6 +19,34 @@ const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
 const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要', granularity: '同じ検証' } };
+
+test('Codexの起動時に一時領域とGoキャッシュを作成し、環境変数と書き込み許可を渡す', async t => {
+  const { dir, target, base } = fixture(t);
+  execFileSync('git', ['init', '--quiet', target]);
+  const state = create(target, '試験', base);
+  const tmp = join(base, state.id, 'tmp');
+  const cache = join(base, 'cache', 'go-build');
+  const script = join(dir, 'agent.cjs');
+  const launch = join(dir, 'launch.json');
+  fakeCodex(script, `
+    fs.writeFileSync(${JSON.stringify(launch)}, JSON.stringify({
+      paths: ['TMP', 'TEMP', 'GOTMPDIR', 'GOCACHE'].map(key => process.env[key]),
+      argv: process.argv.slice(2)
+    }));
+    finish(${JSON.stringify({ ...ok, tasks: [] })});
+  `);
+  for (const stage of ['execute', 'review']) {
+    state.stage = stage;
+    const attempt = join(dir, stage);
+    mkdirSync(attempt);
+    await runAgent(state, attempt, process.execPath, [script], undefined, base);
+    const { paths, argv } = JSON.parse(readFileSync(launch, 'utf8'));
+    assert.deepEqual(paths, [tmp, tmp, tmp, cache]);
+    assert.ok(paths.every(existsSync));
+    assert.equal(argv.find(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')),
+      stage === 'execute' ? `sandbox_workspace_write.writable_roots=${JSON.stringify([tmp, cache])}` : undefined);
+  }
+});
 
 test('Windowsの全起動経路はelevatedを要求し、他の環境には設定しない', async t => {
   const { target, base } = fixture(t);
@@ -41,12 +70,12 @@ test('Windowsの全起動経路はelevatedを要求し、他の環境には設�
         state.grants = { paths: [base], network: true };
         for (const resumed of [false, true]) {
           state.session = resumed ? { stage, ...assignment(state), sessionId: 'old' } : undefined;
-          const args = codexArgs(state);
+          const args = codexArgs(state, undefined, base);
           verify(args);
           assert.equal(Boolean(codexThread(state).threadId), resumed);
           assert.ok(args.includes(`approval_policy="${stage === 'execute' ? 'on-request' : 'never'}"`));
           assert.equal(args.includes('sandbox_workspace_write.network_access=true'), ['execute', 'prereview'].includes(stage));
-          assert.equal(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base])}`), ['execute', 'prereview'].includes(stage));
+          assert.equal(args.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([base, join(base, state.id, 'tmp'), join(base, 'cache', 'go-build')])}`), ['execute', 'prereview'].includes(stage));
           assert.equal(codexThread(state).sandbox, ['execute', 'prereview'].includes(stage) ? 'workspace-write' : 'read-only');
           assert.ok(!claudeArgs(state, 'new').some(arg => /prefer_mxc|windows\.sandbox/.test(arg)));
         }
@@ -472,11 +501,37 @@ test('changeの1タスク群でも独立レビューと最終確認を通り、�
   assert.deepEqual(state.tasks[0], completed);
 });
 
+test('changeの4つ目のexecuteには、それまでのexecuteの変更ファイルと連続失敗を渡す', t => {
+  const { target, base } = fixture(t);
+  const state = create(target, '試験', base, undefined, { kind: 'change', change: 'sample-change' });
+  state.evidence = [{ attempt: ++state.attempts, stage: 'prereview', changedFiles: ['plan.md'] }];
+  const tasks = Array.from({ length: 4 }, (_, index) => ({ ...task, title: `タスク${index + 1}` }));
+  advance(state, { ...prereview, tasks });
+  const completed = { ...ok, tasks: [] };
+  for (const file of ['first.js', 'second.js', 'third.js']) {
+    assert.equal(state.stage, 'execute');
+    state.evidence.push({ attempt: ++state.attempts, stage: 'execute', changedFiles: [file, 'shared.js'] });
+    advance(state, completed);
+    assert.equal(state.stage, 'review');
+    state.attempts++;
+    advance(state, completed);
+  }
+  const failures = [{ attempt: ++state.attempts, kind: 'process', changedFiles: ['retry.js'] }];
+  state.failureStreak = { stage: 'execute', task: 3, count: 1, entries: failures };
+  assert.equal(state.stage, 'execute');
+  const context = JSON.parse(inputFor(state).split('\n').at(-1));
+  assert.equal(context.target.title, 'タスク4');
+  assert.deepEqual(context.evidence, []);
+  assert.deepEqual(context.changedFiles, { files: ['first.js', 'shared.js', 'second.js', 'third.js'], total: 4 });
+  assert.deepEqual(context.failures, failures);
+});
+
 test('prereviewの範囲外変更と検証失敗はfailedにし、選定前の質問を受け付ける', async t => {
   const { target, base } = fixture(t);
   const state = await startChange(target, 'sample-change', {}, base,
     async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
   let retryInput;
+  state.models.prereview = { model: 'gpt-test' };
   await step(state, async current => {
     if (current.attempts === 2) retryInput = JSON.parse(inputFor(current).split('\n').at(-1));
     current.evidence ??= [];
@@ -495,6 +550,22 @@ test('prereviewの範囲外変更と検証失敗はfailedにし、選定前の�
   assert.equal(state.status, 'failed');
   assert.match(state.error, /仕様検証失敗/);
   await validatePrereview({ ...state, change: null }, { ...prereview, outcome: 'question', change: '' }, [], async () => assert.fail('検証不要'));
+});
+
+test('Claudeの実行前レビューは許可外の差分を記録して通過する', async t => {
+  const { target, base } = fixture(t);
+  const state = await startChange(target, 'sample-change', {}, base,
+    async () => JSON.stringify({ root: { path: target, source: 'nearest' }, changes: [{ name: 'sample-change', totalTasks: 1, completedTasks: 0 }] }));
+  const files = ['src/outside.js', 'openspec/changes/unrelated/tasks.md'];
+  await step(state, async current => {
+    assert.equal(current.attemptAssignment.cli, 'claude');
+    current.evidence = [{ attempt: current.attempts, changedFiles: files }];
+    return prereview;
+  }, base, passed, noLimits, (current, result, changed) => validatePrereview(current, result, changed, async () => {}));
+  assert.equal(state.stage, 'execute');
+  assert.equal(state.status, 'ready');
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.find(entry => entry.type === 'external_change')?.detail, { attempt: 1, files });
 });
 
 test('archiveはcompletedのchangeだけ実行し、失敗してもcompletedを維持する', async t => {

@@ -4,17 +4,22 @@ import { readFileSync } from 'node:fs';
 import { reserve } from './locking.js';
 import { resolve, join } from 'node:path';
 import { capture } from './commands.js';
-import { create, save, event, close, dataRoot, validChangeName } from './workflow.js';
-import { validateModel, validateAssignments, stagesFor } from './config.js';
+import { create, save, event, close, dataRoot, validChangeName, temporaryDirectory } from './workflow.js';
+import { attemptAssignment, validateModel, validateAssignments, stagesFor } from './config.js';
 
 const openspec = fileURLToPath(new URL('../node_modules/@fission-ai/openspec/bin/openspec.js', import.meta.url));
 export const runOpenSpec = (target, args) => capture(process.execPath, [openspec, ...args], target, 60_000);
 export const openSpecRoot = state => state.openspec ?? { root: state.target, store: null };
 export const separateOpenSpec = state => state.kind === 'change' && resolve(openSpecRoot(state).root) !== resolve(state.target);
 export const storeArgs = state => openSpecRoot(state).store ? ['--store', openSpecRoot(state).store] : [];
-export const changeDirectories = state => (state.change ? [state.change] : state.candidates.map(item => item.name))
+export const prereviewChangeNames = state => state.change ? [state.change] : state.candidates.map(item => item.name);
+export const changeDirectories = state => prereviewChangeNames(state)
   .map(name => join(openSpecRoot(state).root, 'openspec', 'changes', name));
-export const writablePaths = state => [...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : [])];
+export const goBuildCache = (base = dataRoot) => resolve(base, 'cache', 'go-build');
+export const writablePaths = (state, base = dataRoot) => [
+  ...(state.grants?.paths ?? []), ...(separateOpenSpec(state) ? changeDirectories(state) : []),
+  temporaryDirectory(state, base), goBuildCache(base),
+];
 
 export function taskGate(state) {
   if (!validChangeName(state.change)) throw new Error('change名が不正です');
@@ -70,15 +75,26 @@ export async function archive(state, base = dataRoot, execute = runOpenSpec) {
 }
 
 export async function validatePrereview(state, result, files, execute = runOpenSpec, evidence) {
+  const outside = '実行前レビューが対象changeのディレクトリ外を変更しました';
+  const claude = attemptAssignment(state).cli === 'claude';
+  let external = [];
   if (separateOpenSpec(state)) {
-    if (files.length || !evidence?.openspec || !Array.isArray(evidence.openspec.changedFiles)) throw new Error('実行前レビューが対象changeのディレクトリ外を変更したか、OpenSpecの証拠がありません');
+    if (!Array.isArray(evidence?.openspec?.changedFiles)) throw new Error('OpenSpecの証拠がありません');
+    if (files.length && !claude) throw new Error(outside);
+    external = [...files];
     files = evidence.openspec.changedFiles;
   }
   const selected = state.change ?? result.change;
-  if (!selected && result.outcome !== 'ok' && files.length === 0) return;
-  if (!validChangeName(selected) || !state.candidates.some(item => item.name === selected) ||
-      (result.outcome === 'ok' && selected !== result.change)) throw new Error('候補外のchangeです');
-  const prefix = `openspec/changes/${selected}/`;
-  if (files.some(file => !file.replaceAll('\\', '/').startsWith(prefix))) throw new Error('実行前レビューが対象changeのディレクトリ外を変更しました');
+  if ((selected || result.outcome === 'ok') && (!validChangeName(selected) ||
+      !state.candidates.some(item => item.name === selected) ||
+      (result.outcome === 'ok' && selected !== result.change))) throw new Error('候補外のchangeです');
+  const prefixes = prereviewChangeNames(state).map(name => `openspec/changes/${name}/`);
+  for (const file of files) {
+    const path = file.replaceAll('\\', '/');
+    if (selected && path.startsWith(`openspec/changes/${selected}/`)) continue;
+    if (!claude || prefixes.some(prefix => path.startsWith(prefix))) throw new Error(outside);
+    external.push(file);
+  }
   if (result.outcome === 'ok') await execute(openSpecRoot(state).root, ['validate', selected, ...storeArgs(state)]);
+  return external;
 }
