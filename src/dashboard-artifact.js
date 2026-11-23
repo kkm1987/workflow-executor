@@ -30,6 +30,7 @@ export function artifactCase(view, state) {
     owner: view.owner, nextAction: view.nextAction, updatedAt: view.updatedAt,
     attempt: state.attempts ?? 0, ...artifactActivity({ ...state, activity: view.activity }) };
   if (view.question) result.question = text(view.question);
+  if (view.deferredApprovals) result.deferredApprovals = view.deferredApprovals.map(({ id, tasks }) => ({ id, tasks: text(tasks) }));
   if (['waiting', 'failed', 'blocked', 'limited'].includes(view.status)) result.reason = text(view.error ?? view.result ?? state.lastResult);
   if (view.status === 'completed') result.result = text(view.result);
   if (view.latestReport) {

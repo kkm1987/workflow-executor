@@ -59,6 +59,27 @@ test('要約は分類・順序・対応をMarkdownと共有し、保存済み状
   assert.deepEqual(snapshot(base), value);
 });
 
+test('保留中の承認のIDと対象タスクをMarkdownと閲覧ページに表示する', t => {
+  const { state, base } = fixture(t);
+  state.stage = 'execute';
+  state.status = 'running';
+  const deferred = { id: 'A2', tasks: '11.5 追加検証', action: '非公開の操作内容' };
+  state.approval = { status: 'approved', items: [], pending: [], returned: [deferred], deferredAt: state.updatedAt };
+  save(state, base);
+  assert.match(readFileSync(join(base, 'dashboard.md'), 'utf8'), /保留中の承認: A2（11\.5 追加検証）/);
+  const value = snapshot(base);
+  assert.deepEqual(value.groups[0].cases[0].deferredApprovals, [{ id: 'A2', tasks: deferred.tasks }]);
+  const html = renderArtifact(value);
+  assert.match(html, /保留中の承認: item\.deferredApprovals/);
+  assert.ok(html.includes(deferred.tasks));
+  assert.ok(!html.includes(deferred.action));
+
+  delete state.approval.deferredAt;
+  save(state, base);
+  assert.doesNotMatch(readFileSync(join(base, 'dashboard.md'), 'utf8'), /保留中の承認/);
+  assert.ok(!Object.hasOwn(snapshot(base).groups[0].cases[0], 'deferredApprovals'));
+});
+
 test('要約はパス・ログ参照・証拠本文・コマンド・内部思考・ツール出力を出さず、報告を切り詰める', t => {
   const { state, base } = fixture(t);
   state.status = 'waiting';

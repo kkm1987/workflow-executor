@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { clearCodexLaunchEnvironment } from '../src/commands.js';
@@ -67,7 +67,7 @@ test('CLIのapprove --itemsは指定した項目だけを承認・予約し、�
   const sandbox = join(target, 'sandbox');
   writeFileSync(sandbox, 'process.exit(0);\n');
   const pending = [
-    { id: 'A1', gate: 'plan', action: '追加のパスを使う', grants: { network: false, paths: [extra] } },
+    { id: 'A1', gate: 'plan', action: '追加のパスを使う', effect: 'external', grants: { network: false, paths: [extra] } },
     { id: 'A2', gate: 'plan', action: 'ファイルを確認する' },
     { id: 'A3', gate: 'plan', action: 'ファイルを更新する' },
   ];
@@ -93,4 +93,23 @@ test('CLIのapprove --itemsは指定した項目だけを承認・予約し、�
   assert.deepEqual(current.approval.pending, []);
   assert.deepEqual(current.approval.items.map(item => item.id), ['A2', 'A1', 'A3']);
   assert.deepEqual(current.grants.paths, [extra]);
+
+  save(state, base);
+  const tryApprove = (...args) => spawnSync(process.execPath, [join(dir, 'src', 'cli.js'), 'approve', state.id, ...args],
+    { encoding: 'utf8', windowsHide: true });
+  const invalid = tryApprove('--defer-rest');
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /approve <ID> .*--defer-rest/);
+  assert.equal(load(state.id, base).status, 'waiting');
+  const releaseDeferred = reserve(base, () => ({ id: '別の案件', paths: [extra] }));
+  try {
+    const approved = tryApprove('--items', 'A2', '--defer-rest', conditionFile);
+    assert.equal(approved.status, 0, approved.stderr);
+    assert.match(approved.stderr, /警告: A1: 外部への変更/);
+    assert.equal(JSON.parse(approved.stdout).status, 'ready');
+    const deferred = load(state.id, base);
+    assert.deepEqual(deferred.approval.items.map(item => [item.id, item.conditions]), [['A2', '確認は1回まで']]);
+    assert.deepEqual(deferred.approval.returned.map(item => item.id), ['A1', 'A3']);
+    assert.deepEqual(deferred.grants?.paths ?? [], []);
+  } finally { releaseDeferred(); }
 });

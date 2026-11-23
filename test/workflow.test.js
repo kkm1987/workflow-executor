@@ -666,6 +666,106 @@ test('部分承認は指定項目だけを固定して許可を反映し、残�
   assert.equal(state.approval.conditions, '');
 });
 
+test('指定項目の承認で残りを保留し、有効な許可と外部への変更を警告する', async t => {
+  const { state, target, base } = fixture(t);
+  const extra = join(target, '..', 'extra');
+  mkdirSync(extra);
+  mkdirSync(join(extra, '..child'));
+  const local = { ...approvalItems[0], effect: 'write', grants: { network: false, paths: [] } };
+  state.stage = 'prereview';
+  advance(state, prereviewResult([
+    { ...local, grants: { network: true, paths: [extra] } },
+    { ...local, grants: { network: true, paths: [join(extra, '..child')] } },
+    { ...local, effect: 'external' },
+    local,
+  ]));
+  state.session = { stage: 'prereview', sessionId: '計画' };
+  save(state, base);
+  const before = structuredClone(state);
+  await assert.rejects(approve(state, '', base, passed, ['A1', 'A9'], true), /項目ID/);
+  await assert.rejects(approve(state, '', base, passed, undefined, true), /項目ID/);
+  assert.deepEqual(state, before);
+  assert.deepEqual(load(state.id, base), before);
+
+  const warnings = await approve(state, '承認条件', base, passed, ['A1'], true);
+  assert.equal(state.status, 'ready');
+  assert.equal(state.stage, 'execute');
+  assert.equal(state.question, '');
+  assert.equal(state.session, undefined);
+  assert.equal(state.approval.status, 'approved');
+  assert.equal(state.approval.deferredAt, state.approval.approvedAt);
+  assert.deepEqual(state.approval.items.map(item => [item.id, item.conditions]), [['A1', '承認条件']]);
+  assert.deepEqual(state.approval.pending, []);
+  assert.deepEqual(state.approval.returned, before.approval.pending.slice(1));
+  const view = summary(state, base, true);
+  assert.deepEqual(view.approvalItems.map(item => [item.id, item.status]),
+    [['A1', undefined], ['A2', 'deferred'], ['A3', 'deferred'], ['A4', 'deferred']]);
+  assert.deepEqual(brief(view).deferredApprovals, state.approval.returned.map(({ id, tasks }) => ({ id, tasks })));
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /A2: ネットワーク許可.*パス許可.*sandbox/);
+  assert.match(warnings[1], /A3: 外部への変更/);
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.find(entry => entry.type === 'approval_deferred').detail, { items: state.approval.returned, warnings });
+
+  const all = structuredClone(before);
+  const explicit = structuredClone(before);
+  assert.deepEqual(await approve(all, '', base, passed), []);
+  assert.deepEqual(await approve(explicit, '', base, passed, ['A1', 'A2', 'A3', 'A4'], true), []);
+  const { approvedAt: allAt, ...allApproval } = all.approval;
+  const { approvedAt: explicitAt, ...explicitApproval } = explicit.approval;
+  assert.deepEqual(explicitApproval, allApproval);
+  assert.deepEqual(explicit.grants, all.grants);
+  assert.equal(explicit.status, all.status);
+});
+
+test('実行工程だけに保留中の項目と操作を止める指示を渡す', async t => {
+  const { state, base } = fixture(t);
+  const deferred = { ...approvalItems[0], tasks: '11.5', action: '追加検証を実施' };
+  state.stage = 'prereview';
+  advance(state, prereviewResult([approvalItems[0], deferred]));
+  await approve(state, '', base, passed, ['A1'], true);
+  for (const stage of ['execute', 'review', 'acceptance', 'prereview']) {
+    const input = prompt({ ...state, stage });
+    const data = JSON.parse(input.split('\n').at(-1));
+    assert.deepEqual(data.approval.items.map(item => item.id), ['A1']);
+    if (stage === 'execute') {
+      assert.match(input, /deferredApprovalsの操作が必要になったら、その操作をせずにoutcome=approval/);
+      assert.deepEqual(data.deferredApprovals, [{ id: 'A2', tasks: deferred.tasks, action: deferred.action }]);
+    } else {
+      assert.doesNotMatch(input, /deferredApprovals/);
+      if (stage !== 'prereview') assert.doesNotMatch(input, /追加検証を実施/);
+    }
+  }
+});
+
+test('保留中の変更案は旧版も承認根拠から外れ、再提示時に審査せず承認待ちになる', async t => {
+  const { state, base } = fixture(t);
+  const local = { ...approvalItems[0], effect: 'write' };
+  Object.assign(state, { kind: 'change', stage: 'prereview', change: 'sample-change' });
+  advance(state, prereviewResult([local]));
+  await approve(state, '引き継ぐ条件', base);
+  state.stage = 'prereview';
+  advance(state, prereviewResult([{ ...local, replaces: 'A1' }, local, local]));
+  assert.deepEqual(await approve(state, '', base, passed, ['A2'], true), []);
+  assert.deepEqual(state.approval.items.map(item => item.id), ['A2']);
+  assert.deepEqual(state.approval.returned.map(item => item.id), ['A1', 'A3']);
+  advance(state, { ...ok(), outcome: 'question', question: 'A1を再検討しますか' });
+  answer(state, 'A1を出し直す', base);
+  advance(state, { ...ok(), outcome: 'approval' });
+  let reviewed = 0;
+  await nativeStep(state, async () => prereviewResult([{ ...local, replaces: 'A1', basisAnswer: 1 }], ['A2']),
+    base, passed, async () => ({ limits: null, failure: null }), async () => {}, async () => { reviewed++; });
+  assert.equal(reviewed, 0);
+  assert.equal(state.status, 'waiting');
+  assert.deepEqual(state.approval.items.map(item => item.id), ['A2']);
+  assert.deepEqual(state.approval.pending.map(item => [item.id, item.conditions]), [['A1', '引き継ぐ条件']]);
+  assert.deepEqual(state.approval.returned, []);
+  assert.ok(!Object.hasOwn(state.approval, 'deferredAt'));
+  const events = readFileSync(join(base, state.id, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.find(entry => entry.type === 'approval_removed' && entry.detail.reason === 'returned')
+    .detail.items.map(item => item.id), ['A3']);
+});
+
 test('f894917bの回答は部分承認がある場合だけA2〜A8を継続できる', async t => {
   const initial = Array.from({ length: 8 }, (_, index) => ({ ...approvalItems[0], action: `操作${index + 1}` }));
   const followup = ['A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'];
@@ -717,6 +817,7 @@ test('承認計画へのanswerは回答を保存して実行前レビューへ�
   assert.deepEqual(load(state.id, base).approval, state.approval);
   assert.deepEqual(summary(state, base, true).approvalItems.map(item => [item.id, item.status]),
     proposed.map(item => [item.id, 'returned']));
+  assert.ok(!Object.hasOwn(brief(summary(state, base)), 'deferredApprovals'));
   advance(state, prereviewResult(approvalItems));
   assert.equal(state.approval.pending[0].id, 'A9');
 });

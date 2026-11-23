@@ -7,7 +7,7 @@ import { root, create, advance, answer, approve, grant, load, summary, save, nor
 import { runAgent, step } from '../src/executor.js';
 import { readConfig } from '../src/config.js';
 import { codexSession, escalationDecision } from '../src/codex-app-server.js';
-import { resolveScript, safeGitRead, commandDecision, reviewCommand, reviewProblem, codexReview, reviewPrompt } from '../src/escalation.js';
+import { resolveScript, safeGitRead, commandDecision, reviewCommand, reviewProblem, codexReview, reviewPrompt, planItems } from '../src/escalation.js';
 import { sandboxProfileArgs } from '../src/commands.js';
 import { fakeCodex } from './fixtures/codex.js';
 
@@ -116,6 +116,24 @@ test('審査の許可は実行器が検証し、失敗は所有者へ戻す', as
   assert.equal((await reviewCommand(state, escalationDecision(state, method, params('& ./upload.ps1', target)), null)).decision, 'decline');
   assert.equal(commandDecision({ ...state, approval: { ...plan, items: [plan.items[1]] } }, 'other').reviewRequest, undefined);
   assert.equal(commandDecision({ ...state, approval: undefined }, 'other').reviewRequest, undefined);
+});
+
+test('計画審査は保留中のスクリプトの昇格を所有者に回す', async t => {
+  const { target, base, state } = fixture(t);
+  const { id, ...entry } = item;
+  state.stage = 'prereview';
+  advance(state, pre([{ ...entry, action: 'ローカルで検証', effect: 'read' }, { ...entry, scripts: ['upload.ps1'] }]));
+  await approve(state, '', base, undefined, ['A1'], true);
+  assert.deepEqual(planItems(state).map(item => item.id), ['A1']);
+  const choice = commandDecision(state, '& ./upload.ps1', target);
+  assert.deepEqual([choice.decision, choice.layer], ['decline', 3]);
+  assert.ok(choice.reviewRequest);
+  const final = await reviewCommand(state, choice, async input => {
+    const data = JSON.parse(input.split('\n').at(-1));
+    assert.deepEqual(data.approval.items.map(item => item.id), ['A1']);
+    return { ...allow, approvalId: 'A2' };
+  });
+  assert.deepEqual([final.decision, final.layer], ['decline', 3]);
 });
 
 test('計画審査は固定したスクリプトのパスと内容を照合し、未固定なら従来どおり判定する', async t => {

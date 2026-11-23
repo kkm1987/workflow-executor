@@ -63,6 +63,7 @@
           details.append(element('summary', '案件の詳細'));
           const list = element('dl');
           const fields = { 質問: item.question, 停止理由: item.reason, 結果: item.result,
+            保留中の承認: item.deferredApprovals?.map(({ id, tasks }) => `${id}（${tasks}）`).join('、'),
             対象: item.report?.scope, 判断と理由: item.report?.decisions, 検証: item.report?.verification, 残件: item.report?.remaining };
           for (const [label, value] of Object.entries(fields)) if (value) list.append(element('dt', label), element('dd', value));
           details.append(list, element('div', `ID: ${item.id}`, 'id'), element('div', `最終更新: ${time(item.updatedAt)}`, 'muted'));

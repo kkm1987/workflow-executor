@@ -20,7 +20,7 @@ const help = `Workflow Executor (Node.js 22+ / Codex CLI)
   step <ID>                     次の1工程を実行
   run <ID>                      回答待ち・失敗・完了まで工程を進める
   answer <ID> <回答ファイル> [--inquiry]  回答を保存（--inquiryは確認の質問）
-  approve <ID> [--items <ID,...>] [条件ファイル]    承認待ちの項目を承認し、項目ごとの条件を保存
+  approve <ID> [--items <ID,...> [--defer-rest]] [条件ファイル]    承認待ちの項目を承認し、指定時は残りを保留
   grant <ID> [--network] [--path <ディレクトリ>]... [--command <コマンド>]...  権限要求を許可して再開
   retry <ID>                 失敗・中断後、変更確認を経て再開可能にする
   evidence <ID> <JSONファイル>  停止中の案件へ外部証拠を登録
@@ -46,13 +46,14 @@ try {
       (command === 'model' && ![3, 4].includes(args.length)) ||
       (command === 'fallback' && (![3, 4].includes(args.length) || (args[2] === '--disable' && args.length !== 3))) ||
       (command === 'close' && ![1, 2].includes(args.length))) throw new Error(help);
-    let approvalIds, conditionFile;
+    let approvalIds, conditionFile, deferRest;
     if (command === 'approve') {
-      const [, option, ids, file] = args;
+      const [, option, ids, next, file] = args;
       if (option === '--items') {
-        if (!ids || ids.startsWith('--') || args.length > 4 || file?.startsWith('--')) throw new Error(help);
+        deferRest = next === '--defer-rest';
+        conditionFile = deferRest ? file : next;
+        if (!ids || ids.startsWith('--') || args.length > (deferRest ? 5 : 4) || conditionFile?.startsWith('--')) throw new Error(help);
         approvalIds = ids.split(',');
-        conditionFile = file;
       } else {
         if (!args.length || args.length > 2 || option?.startsWith('--')) throw new Error(help);
         conditionFile = option;
@@ -117,7 +118,11 @@ try {
         console.log(JSON.stringify(brief(summary(current))));
       });
       else if (command === 'answer') answer(state, readFileSync(resolve(args[1]), 'utf8'), dataRoot, args[2] === '--inquiry');
-      else if (command === 'approve') await approve(state, conditionFile ? readFileSync(resolve(conditionFile), 'utf8') : '', dataRoot, undefined, approvalIds);
+      else if (command === 'approve') {
+        const warnings = await approve(state, conditionFile ? readFileSync(resolve(conditionFile), 'utf8') : '',
+          dataRoot, undefined, approvalIds, deferRest);
+        for (const warning of warnings) console.error(`警告: ${warning}`);
+      }
       else if (command === 'close') close(state, args[1] ? readFileSync(resolve(args[1]), 'utf8') : '');
       else if (command === 'grant') {
         const options = { network: false, paths: [], commands: [] };
