@@ -63,8 +63,8 @@ test('保留中の承認のIDと対象タスクをMarkdownと閲覧ページに�
   const { state, base } = fixture(t);
   state.stage = 'execute';
   state.status = 'running';
-  const deferred = { id: 'A2', tasks: '11.5 追加検証', action: '非公開の操作内容' };
-  state.approval = { status: 'approved', items: [], pending: [], returned: [deferred], deferredAt: state.updatedAt };
+  const deferred = { id: 'A2', tasks: '11.5 追加検証', action: '非公開の操作内容', deferredAt: state.updatedAt };
+  state.approval = { status: 'approved', items: [], pending: [], returned: [deferred] };
   save(state, base);
   assert.match(readFileSync(join(base, 'dashboard.md'), 'utf8'), /保留中の承認: A2（11\.5 追加検証）/);
   const value = snapshot(base);
@@ -74,7 +74,7 @@ test('保留中の承認のIDと対象タスクをMarkdownと閲覧ページに�
   assert.ok(html.includes(deferred.tasks));
   assert.ok(!html.includes(deferred.action));
 
-  delete state.approval.deferredAt;
+  delete deferred.deferredAt;
   save(state, base);
   assert.doesNotMatch(readFileSync(join(base, 'dashboard.md'), 'utf8'), /保留中の承認/);
   assert.ok(!Object.hasOwn(snapshot(base).groups[0].cases[0], 'deferredApprovals'));

@@ -257,11 +257,11 @@ test('代替確認の失敗はfailed・0試行、未選択CLIは未確認、同�
   const state = make();
   state.stage = 'execute'; state.tasks = [{ ...ok.tasks[0], status: 'pending' }];
   let executions = 0; checks = 0;
-  await run(state, async () => { executions++; return executions === 1 ? { ...ok, outcome: 'partial' } : { ...ok, outcome: 'question', question: '確認' }; }, base, undefined,
+  await run(state, async () => { executions++; return executions === 1 ? { ...ok, outcome: 'partial' } : { ...ok, outcome: 'question', returnTo: 'execute', question: '確認' }; }, base, undefined,
     async () => { checks++; return { ok: true }; }, async () => ({ limits: enough, failure: null }));
   assert.equal(checks, 1); assert.equal(executions, 2);
   answer(state, '回答', base);
-  await step(state, async () => ({ ...ok, outcome: 'question', question: '確認' }), base, async () => { checks++; return { ok: true }; }, async () => ({ limits: enough, failure: null }));
+  await step(state, async () => ({ ...ok, outcome: 'question', returnTo: 'execute', question: '確認' }), base, async () => { checks++; return { ok: true }; }, async () => ({ limits: enough, failure: null }));
   assert.equal(checks, 2);
 });
 
@@ -399,7 +399,7 @@ test('進捗なしpartialは2回で止まり、回答後は同じタスクを新
     assert.equal(resumeSession(current), null);
     assert.match(inputFor(current), /別の手順で続行/);
     assert.equal(current.stage, 'execute');
-    return { ...ok, outcome: 'question', question: '確認' };
+    return { ...ok, outcome: 'question', returnTo: 'execute', question: '確認' };
   }, base, passed, async () => ({ limits: enough, failure: null }));
   assert.equal(state.idlePartials, undefined);
 });

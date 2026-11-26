@@ -240,6 +240,8 @@ test('計画審査の設定は既定・無効・Claude拒否を検証する', t 
 });
 
 const pre = (approvals = [], retainedApprovals = []) => ({ ...ok, tasks: [{ title: 'T', acceptance: 'A' }], approvals, retainedApprovals, change: 'sample-change',
+  retainedDeferredApprovals: [],
+  readiness: [{ task: 'T', check: '入力', source: '仕様', result: 'ok', evidence: '一致' }],
   decisions: { selection: 's', applicability: 'a', updates: 'u', granularity: '同じ検証' } });
 
 test('回答を根拠とする変更は審査で置き換え、範囲外は承認待ち、差し戻しで承認済みを保持する', async t => {

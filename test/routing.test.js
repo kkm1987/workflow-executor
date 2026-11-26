@@ -18,7 +18,9 @@ const passed = async () => ({ ok: true });
 const noLimits = async () => ({ limits: null, failure: null });
 const task = { title: '入力検証', acceptance: '空入力を拒否する' };
 const ok = { report, returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', decisions: { requirements: '要求', granularity: '粒度', architecture: '設計' }, tasks: [task] };
-const prereview = { ...ok, approvals: [], retainedApprovals: [], change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要', granularity: '同じ検証' } };
+const prereview = { ...ok, approvals: [], retainedApprovals: [], retainedDeferredApprovals: [],
+  readiness: [{ task: task.title, check: '入力', source: '仕様', result: 'ok', evidence: '一致' }],
+  change: 'sample-change', decisions: { selection: '依存なし', applicability: '現状に合致', updates: '変更不要', granularity: '同じ検証' } };
 
 test('Codexの起動時に一時領域とGoキャッシュを作成し、環境変数と書き込み許可を渡す', async t => {
   const { dir, target, base } = fixture(t);
@@ -327,8 +329,9 @@ test('承認計画への回答は同じ担当のセッションへ説明・回�
     assert.equal(state.session.stage, 'prereview');
     answer(state, 'VMは使用しない', base);
     const saved = structuredClone(state.session);
-    const expected = '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\nVMは使用しない\n承認項目に使えるID（継続: retain、変更元: replace）\n{"retain":[],"replace":["A1"]}';
-    assert.equal(inputFor(state), expected);
+    const expected = inputFor(state);
+    assert.match(expected, /^承認計画への所有者の回答です。.*\nVMは使用しない\n/);
+    assert.deepEqual(JSON.parse(expected.split('\n').at(-1)), { retain: [], replace: ['A1'], deferred: [] });
     const args = () => assignment(state).cli === 'codex' ? codexArgs(state) : claudeArgs(state, '新規');
     const resumeFlag = assignment(state).cli === 'codex' ? 'resume' : '--resume';
     assert.equal(assignment(state).cli === 'codex' ? codexThread(state).threadId : args()[args().indexOf(resumeFlag) + 1], saved.sessionId);
@@ -506,7 +509,7 @@ test('changeの4つ目のexecuteには、それまでのexecuteの変更ファ�
   const state = create(target, '試験', base, undefined, { kind: 'change', change: 'sample-change' });
   state.evidence = [{ attempt: ++state.attempts, stage: 'prereview', changedFiles: ['plan.md'] }];
   const tasks = Array.from({ length: 4 }, (_, index) => ({ ...task, title: `タスク${index + 1}` }));
-  advance(state, { ...prereview, tasks });
+  advance(state, { ...prereview, tasks, readiness: [{ ...prereview.readiness[0], task: tasks[0].title }] });
   const completed = { ...ok, tasks: [] };
   for (const file of ['first.js', 'second.js', 'third.js']) {
     assert.equal(state.stage, 'execute');

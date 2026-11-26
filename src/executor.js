@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, writeFileSync, writeSync, mkdirSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope, executePermissions, escalationCounts, temporaryDirectory } from './workflow.js';
+import { root, dataRoot, directory, save, saveActivity, event, advance, validateResult, resolveInquiry, prompt, approvalIds, targetTask, attemptScope, sameScope, executePermissions, prereviewChecks, executeChecks, escalationCounts, temporaryDirectory } from './workflow.js';
 import { snapshot, changedFiles } from './evidence.js';
 import { preflight } from './preflight.js';
 import { tokenMetrics, performanceReport } from './metrics.js';
@@ -34,11 +34,13 @@ export function resumeSession(state) {
 export function inputFor(state, config) {
   if (!resumeSession(state)) return prompt(state, state.status === 'running' ? Date.parse(state.inputAt) : Date.now(), config);
   const last = state.answers.at(-1);
-  if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' + last.answer;
+  if (last.inquiry) return '回答ではなく確認の質問である。作業を進めず、判断の理由をquestionに書いてoutcome=questionで返す。\n' +
+    (state.stage === 'execute' ? 'returnTo=executeとする。\n' : '') + last.answer;
   const answer = (last.approval ? '承認計画への所有者の回答です。反映し、継続する項目はIDで示して追加・変更分だけを返してください。\n' : '') + last.answer;
-  if (state.stage === 'execute') return answer + '\n' + executePermissions(state, config);
+  if (state.stage === 'execute') return answer + '\n' + executePermissions(state, config) + '\n' + executeChecks;
   return state.stage === 'prereview'
-    ? answer + '\n承認項目に使えるID（継続: retain、変更元: replace）\n' + JSON.stringify(approvalIds(state))
+    ? answer + '\n' + prereviewChecks + '\n承認項目に使えるID（継続: retain、変更元: replace、保留の持ち越し: deferred）\n' +
+      JSON.stringify(approvalIds(state))
     : answer;
 }
 
@@ -362,6 +364,7 @@ async function reviewAnswers(state, result, dir, review) {
   if (state.stage !== 'prereview' || result?.outcome !== 'ok' || !Array.isArray(result.approvals)) return {};
   const reviews = {};
   for (const [index, item] of result.approvals.entries()) {
+    // 差し戻し済みの項目と、deferredAt付きの保留中の項目はどちらも再承認が必要。
     if (state.approval?.returned?.some(entry => entry.id === item?.replaces)) continue;
     const before = planItems(state).find(entry => entry.id === item?.replaces);
     const basis = state.answers[(item?.basisAnswer ?? 0) - 1];
@@ -486,8 +489,10 @@ async function executeStep(state, runner, base, limits, validate, check, checked
       const problems = taskGate(state);
       if (problems.length) result = { ...result, outcome: 'revise', summary: `tasks.mdの確認に失敗しました:\n${problems.join('\n')}` };
     }
-    if (inquiry) resolveInquiry(state, result);
-    else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base), base });
+    if (inquiry) {
+      if (state.stage === 'execute' && result?.outcome === 'question') validateResult(result, state.stage, state);
+      resolveInquiry(state, result);
+    } else advance(state, result, { reviews: await reviewAnswers(state, result, dir, review), log: (type, detail) => event(state, type, detail, base), base });
     if (state.status === 'failed') {
       failure = Object.assign(new Error(result.summary), { kind: `reported-${result.cause}` });
     }

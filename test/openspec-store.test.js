@@ -168,7 +168,8 @@ test('実storeの開始からレビュー・apply・アーカイブまで、両�
     const result = { returnTo: 'none', outcome: 'ok', cause: '', summary: '検証済み', question: '', report,
       decisions: current.stage === 'prereview' ? { selection: '指定', applicability: '実行可能', updates: 'タスク確認', granularity: '同じ検証' } : { requirements: '', granularity: '', architecture: '' },
       tasks: current.stage === 'prereview' ? [{ title: '挨拶を実装', acceptance: 'Helloを保存' }] : [],
-      ...(current.stage === 'prereview' ? { change: 'sample', approvals: [], retainedApprovals: [] } : {}) };
+      ...(current.stage === 'prereview' ? { change: 'sample', approvals: [], retainedApprovals: [], retainedDeferredApprovals: [],
+        readiness: [{ task: '挨拶を実装', check: '対象', source: 'tasks.md', result: 'ok', evidence: '一致' }] } : {}) };
     const edits = current.stage === 'prereview'
       ? `fs.appendFileSync(${JSON.stringify(join(change, 'tasks.md'))}, '\\n');`
       : current.stage === 'execute'

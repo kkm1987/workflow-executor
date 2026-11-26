@@ -32,6 +32,22 @@
       }
     },
     "retainedApprovals": { "type": "array", "items": { "type": "string" } },
+    "retainedDeferredApprovals": { "type": "array", "items": { "type": "string" } },
+    "readiness": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": { "type": "string" },
+          "check": { "type": "string" },
+          "source": { "type": "string" },
+          "result": { "type": "string", "enum": ["ok", "ng", "unverifiable"] },
+          "evidence": { "type": "string" }
+        },
+        "required": ["task", "check", "source", "result", "evidence"],
+        "additionalProperties": false
+      }
+    },
     "returnTo": { "type": "string", "enum": ["execute", "prereview", "none"] },
     "outcome": { "type": "string", "enum": ["ok", "question", "error"] },
     "cause": { "type": "string", "enum": ["", "transient", "environment"] },
@@ -70,6 +86,6 @@
       }
     }
   },
-  "required": ["returnTo", "outcome", "cause", "summary", "question", "change", "decisions", "tasks", "report", "approvals", "retainedApprovals"],
+  "required": ["returnTo", "outcome", "cause", "summary", "question", "change", "decisions", "tasks", "report", "approvals", "retainedApprovals", "retainedDeferredApprovals", "readiness"],
   "additionalProperties": false
 }

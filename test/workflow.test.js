@@ -101,8 +101,69 @@ const revise = { report, returnTo: 'prereview', outcome: 'revise', cause: '', su
 const approvalItems = [{ tasks: '1.1', action: 'VMで検証', limits: '合計€20以内', stopWhen: '上限に達した場合', gate: 'plan',
   scripts: [], files: [], effect: 'external', costCheck: '起動前に見積額を確認', grants: { network: false, paths: [] } }];
 const approvedItems = approvalItems.map((item, index) => ({ ...item, id: `A${index + 1}` }));
-const prereviewResult = (approvals = [], retainedApprovals = []) => ({ ...ok([task]), change: 'sample-change', approvals, retainedApprovals,
+const readiness = { task: task.title, check: '入力の版', source: 'manifest.json', result: 'ok', evidence: 'v1' };
+const prereviewResult = (approvals = [], retainedApprovals = []) => ({ ...ok([task]), change: 'sample-change', approvals,
+  retainedApprovals, retainedDeferredApprovals: [], readiness: [readiness],
   decisions: { selection: '指定change', applicability: '実行可能', updates: '変更不要', granularity: '同じモジュールを同じ試験で確認' } });
+
+test('実行前レビューは先頭タスクの照合、不一致の解消、空でない欄を要求する', t => {
+  const { state } = fixture(t);
+  const next = { title: '次のタスク', acceptance: '動作する' };
+  const result = { ...prereviewResult(approvalItems), tasks: [task, next] };
+  Object.assign(state, { stage: 'prereview', readiness: [readiness] });
+  const before = structuredClone(state);
+  for (const entries of [undefined, [], [{ ...readiness, task: next.title }],
+    [readiness, { ...readiness, task: '未知のタスク' }], [{ ...readiness, result: 'ng' }],
+    ...Object.keys(readiness).map(key => [{ ...readiness, [key]: ' ' }])]) {
+    assert.throws(() => advance(state, { ...result, readiness: entries }), { kind: 'invalid' });
+    assert.deepEqual(state, before);
+  }
+});
+
+test('実行前レビューは質問と環境エラーに不一致の照合を含められる', t => {
+  const { state } = fixture(t);
+  state.stage = 'prereview';
+  const result = { ...prereviewResult(), readiness: [{ ...readiness, result: 'ng' }] };
+  advance(state, { ...result, outcome: 'question', question: '入力の版を変更しますか？' });
+  assert.equal(state.status, 'waiting');
+  advance(state, { ...result, outcome: 'error', cause: 'environment' });
+  assert.equal(state.status, 'failed');
+  assert.equal(state.readiness, undefined);
+});
+
+test('照合不能の条件と出典だけを該当タスクの実行工程へ渡す', t => {
+  const { state } = fixture(t);
+  const next = { title: '次のタスク', acceptance: '動作する' };
+  const unresolved = { ...readiness, check: '件数', source: 'ストア', result: 'unverifiable' };
+  const result = { ...prereviewResult(), tasks: [task, next],
+    readiness: [readiness, unresolved, { ...unresolved, task: next.title, check: '別の条件' }] };
+  state.stage = 'prereview';
+  advance(state, result);
+  assert.deepEqual(state.readiness, result.readiness);
+  const context = stage => JSON.parse(prompt({ ...state, stage }).split('\n').at(-1));
+  assert.deepEqual(context('execute').readiness, [{ check: unresolved.check, source: unresolved.source }]);
+  state.readiness = Array.from({ length: 21 }, () => ({ ...unresolved, check: '条'.repeat(301), source: '出'.repeat(301) }));
+  assert.deepEqual(context('execute').readiness, Array.from({ length: 20 }, () => ({
+    check: '条'.repeat(300), source: '出'.repeat(300),
+  })));
+  assert.equal(context('review').readiness, undefined);
+  assert.equal(context('acceptance').readiness, undefined);
+  state.stage = 'prereview';
+  advance(state, prereviewResult());
+  assert.deepEqual(state.readiness, [readiness]);
+  assert.equal(context('execute').readiness, undefined);
+});
+
+test('実行前レビューは次の依頼までの条件を照合し、実行は変更前に不一致をまとめるよう指示する', t => {
+  const { state } = fixture(t);
+  const pre = prompt({ ...state, stage: 'prereview' });
+  assert.match(pre, /返すタスクの先頭と、所有者への新しい依頼なしに続けて実行できるタスク/);
+  assert.match(pre, /入力の有無と版.*読み取り専用で照合する/);
+  assert.match(pre, /出典・判定・観測値.*照合不能の理由はevidenceに書く/);
+  const execute = prompt({ ...state, stage: 'execute' });
+  assert.match(execute, /外部への変更・課金・commit・push・長時間の占有の前に.*読み取り専用で確かめる/);
+  assert.match(execute, /残りの読み取り専用の確認を続け、すべての不一致の場所と観測値をsummaryに書いてからoutcome=replanまたはoutcome=approval/);
+});
 
 test('replanはexecute専用で、セッションを破棄し手戻りに数えない', t => {
   const result = { ...ok(), outcome: 'replan' };
@@ -144,9 +205,15 @@ test('所有者の回答なしでreplanが2回続くと待機し、回答後に�
   answer(saved, '失敗の詳細は？', base, true);
   assert.equal(saved.replans, 2);
   resolveInquiry(saved, { outcome: 'question', question: '全体実行の終了時に失敗しました' });
-  answer(saved, '検証を単独実行に変更する', base);
-  assert.equal(load(saved.id, base).replans, undefined);
-  advance(saved, { ...result, summary: '所有者の回答に沿って単独実行に変更する' });
+  answer(saved, '検証の上限を変更する', base);
+  const answered = load(saved.id, base);
+  assert.equal(answered.replans, undefined);
+  assert.equal(answered.stage, 'prereview');
+  assert.equal(answered.answerStage, undefined);
+  assert.equal(answered.session, undefined);
+  assert.match(inputFor(answered), /検証の上限を変更する/);
+  advance(saved, prereviewResult());
+  advance(saved, { ...result, summary: '上限の変更後に検証が失敗' });
   assert.equal(saved.stage, 'prereview');
   assert.equal(saved.status, 'ready');
   assert.equal(saved.replans, 1);
@@ -295,7 +362,7 @@ for (const permission of [undefined, { network: true, paths: [] }]) {
     await step(state, async current => {
       assert.equal(codexThread(current).threadId, '保存セッション');
       assert.match(inputFor(current), /回答ではなく確認の質問/);
-      return { ...ok(), outcome: permission ? 'permission' : 'question',
+      return { ...ok(), outcome: permission ? 'permission' : 'question', returnTo: permission ? 'none' : 'execute',
         question: '判断の理由を説明。元の質問', ...(permission ? { permission } : {}) };
     }, base);
     assert.equal(state.status, 'waiting');
@@ -313,7 +380,8 @@ for (const outcome of ['ok', 'partial', 'revise', 'approval', 'question', 'permi
     answer(state, '理由は？', base, true);
     const preserved = ['question', 'permission', 'approval', 'stage', 'tasks', 'partials', 'revisions', 'lastResult'];
     const before = structuredClone(state);
-    await step(state, async () => ({ outcome, question: ' 別の説明 ', summary: '要約', permission: { paths: [] } }), base);
+    await step(state, async () => ({ ...ok(), outcome, returnTo: outcome === 'question' ? 'execute' : 'none',
+      question: ' 別の説明 ', summary: '要約', permission: { paths: [] } }), base);
     for (const key of preserved) assert.deepEqual(state[key], before[key]);
     assert.equal(state.status, 'waiting');
     assert.equal(state.answers.at(-1).reply, '別の説明');
@@ -449,7 +517,7 @@ test('統合した実行タスクを実装・レビューし、最終確認で�
   const { state, target, base } = fixture(t);
   Object.assign(state, { kind: 'change', stage: 'prereview' });
   const grouped = { ...task, title: '1.1・1.2 入力検証' };
-  advance(state, { ...prereviewResult(), tasks: [grouped] });
+  advance(state, { ...prereviewResult(), tasks: [grouped], readiness: [{ ...readiness, task: grouped.title }] });
   const change = join(target, 'openspec', 'changes', state.change);
   mkdirSync(change, { recursive: true });
   const tasksFile = join(change, 'tasks.md');
@@ -693,10 +761,11 @@ test('指定項目の承認で残りを保留し、有効な許可と外部へ�
   assert.equal(state.question, '');
   assert.equal(state.session, undefined);
   assert.equal(state.approval.status, 'approved');
-  assert.equal(state.approval.deferredAt, state.approval.approvedAt);
+  assert.ok(!Object.hasOwn(state.approval, 'deferredAt'));
   assert.deepEqual(state.approval.items.map(item => [item.id, item.conditions]), [['A1', '承認条件']]);
   assert.deepEqual(state.approval.pending, []);
-  assert.deepEqual(state.approval.returned, before.approval.pending.slice(1));
+  assert.deepEqual(state.approval.returned, before.approval.pending.slice(1)
+    .map(item => ({ ...item, deferredAt: state.approval.approvedAt })));
   const view = summary(state, base, true);
   assert.deepEqual(view.approvalItems.map(item => [item.id, item.status]),
     [['A1', undefined], ['A2', 'deferred'], ['A3', 'deferred'], ['A4', 'deferred']]);
@@ -749,7 +818,7 @@ test('保留中の変更案は旧版も承認根拠から外れ、再提示時�
   assert.deepEqual(await approve(state, '', base, passed, ['A2'], true), []);
   assert.deepEqual(state.approval.items.map(item => item.id), ['A2']);
   assert.deepEqual(state.approval.returned.map(item => item.id), ['A1', 'A3']);
-  advance(state, { ...ok(), outcome: 'question', question: 'A1を再検討しますか' });
+  advance(state, { ...ok(), outcome: 'question', returnTo: 'execute', question: 'A1を再検討しますか' });
   answer(state, 'A1を出し直す', base);
   advance(state, { ...ok(), outcome: 'approval' });
   let reviewed = 0;
@@ -876,21 +945,93 @@ test('retry・partial・revise・証拠登録は承認計画と条件を保持�
   assert.deepEqual(load(state.id, base).approval, approval);
 });
 
-test('実行前レビューの新規入力と再開入力は同じ継続・変更元IDを渡す', t => {
+test('実行前レビューの新規入力と再開入力は同じ継続・変更元・保留のIDを渡す', t => {
   const { state } = fixture(t);
   const [approved] = approvedItems;
   const returned = { ...approved, id: 'A2', action: '再検討する操作' };
+  const deferred = ['A3', 'A4'].map(id => ({ ...approved, id, deferredAt: state.updatedAt }));
   Object.assign(state, { kind: 'change', stage: 'prereview',
-    approval: { status: 'approved', items: [approved], returned: [returned], conditions: '' },
+    approval: { status: 'approved', items: [approved], returned: [returned, ...deferred], conditions: '' },
     answers: [{ approval: true, answer: 'A2は再検討' }] });
   const full = JSON.parse(inputFor(state).split('\n').at(-1));
-  assert.deepEqual(full.approval, { items: [approved], returned: [returned], conditions: '' });
-  assert.deepEqual(full.approvalIds, { retain: ['A1'], replace: ['A1', 'A2'] });
+  assert.deepEqual(full.approval, { items: [approved], returned: [returned, ...deferred], conditions: '' });
+  assert.deepEqual(full.approvalIds, { retain: ['A1'], replace: ['A1', 'A2', 'A3', 'A4'], deferred: ['A3', 'A4'] });
   state.session = { ...attemptAssignment(state), stage: state.stage, sessionId: '計画' };
   const resumed = inputFor(state);
   assert.match(resumed, /承認計画への所有者の回答.*\nA2は再検討/);
+  assert.match(resumed, /読み取り専用で照合する.*照合不能の理由はevidenceに書く/);
+  assert.match(resumed, /次の対象タスクがその操作を必要とする場合だけ出し直す.*retainedDeferredApprovals/);
   assert.ok(!resumed.includes(returned.action));
   assert.deepEqual(JSON.parse(resumed.split('\n').at(-1)), full.approvalIds);
+  assert.doesNotThrow(() => validateResult({ ...prereviewResult([], ['A1']), retainedDeferredApprovals: full.approvalIds.deferred }, 'prereview', state));
+});
+
+test('旧状態を読むと承認計画の保留日時を各項目へ移す', t => {
+  const { state, base } = fixture(t);
+  const [item] = approvedItems;
+  state.approval = { status: 'pending', pending: [], items: [], deferredAt: '2026-11-23T00:00:00Z',
+    returned: [item, { ...item, id: 'A2', deferredAt: '2026-11-24T00:00:00Z' }] };
+  save(state, base);
+  const { approval } = load(state.id, base);
+  assert.deepEqual(approval.returned.map(entry => entry.deferredAt),
+    ['2026-11-23T00:00:00Z', '2026-11-24T00:00:00Z']);
+  assert.ok(!Object.hasOwn(approval, 'deferredAt'));
+});
+
+test('保留を持ち越した後の追加保留と差し戻しは既存の日時を保持する', async t => {
+  const { state, base } = fixture(t);
+  const [item] = approvedItems;
+  const deferred = { ...item, id: 'A3', deferredAt: '2026-11-23T00:00:00Z' };
+  Object.assign(state, { stage: 'prereview', approval: {
+    status: 'approved', items: [], pending: [], returned: [deferred], nextId: 8,
+  } });
+  advance(state, { ...prereviewResult([approvalItems[0], approvalItems[0]]), retainedDeferredApprovals: ['A3'] });
+  const returned = structuredClone(state);
+  await approve(state, '', base, passed, ['A8'], true);
+  assert.deepEqual(state.approval.items.map(entry => entry.id), ['A8']);
+  assert.deepEqual(state.approval.returned.map(entry => [entry.id, entry.deferredAt]),
+    [['A3', deferred.deferredAt], ['A9', state.approval.approvedAt]]);
+  answer(returned, 'A8とA9を再検討', base);
+  assert.deepEqual(returned.approval.returned.map(entry => [entry.id, entry.deferredAt]),
+    [['A3', deferred.deferredAt], ['A8', undefined], ['A9', undefined]]);
+  assert.deepEqual(summary(returned, base, true).approvalItems.map(entry => [entry.id, entry.status]),
+    [['A3', 'deferred'], ['A8', 'returned'], ['A9', 'returned']]);
+  const execute = JSON.parse(prompt({ ...returned, stage: 'execute' }).split('\n').at(-1));
+  assert.deepEqual(execute.deferredApprovals.map(entry => entry.id), ['A3']);
+});
+
+test('保留中でないIDや変更元と重なるIDの持ち越しを拒否する', t => {
+  const { state } = fixture(t);
+  const [item] = approvedItems;
+  Object.assign(state, { stage: 'prereview', approval: { items: [item], returned: [
+    { ...item, id: 'A2' }, { ...item, id: 'A3', deferredAt: state.updatedAt },
+  ] } });
+  const before = structuredClone(state);
+  for (const result of [
+    { ...prereviewResult(), retainedDeferredApprovals: undefined },
+    ...['A1', 'A2'].map(id => ({ ...prereviewResult(), retainedDeferredApprovals: [id] })),
+    { ...prereviewResult([{ ...approvalItems[0], replaces: 'A3' }]), retainedDeferredApprovals: ['A3'] },
+  ]) {
+    assert.throws(() => advance(state, result), /保留を続けるIDが不正/);
+    assert.deepEqual(state, before);
+  }
+});
+
+test('次のタスクで不要な承認の持ち越しだけなら承認待ちにならない', t => {
+  const { state } = fixture(t);
+  const [item] = approvedItems;
+  const deferred = ['A3', 'A4', 'A7'].map(id => ({ ...item, id, tasks: '11.10', action: 'push', deferredAt: state.updatedAt }));
+  Object.assign(state, { stage: 'prereview', approval: { status: 'approved', items: [], pending: [],
+    returned: [item, ...deferred], nextId: 8 } });
+  assert.match(prompt(state), /次の対象タスクがその操作を必要とする場合だけ出し直す.*retainedDeferredApprovals/);
+  const log = [];
+  advance(state, { ...prereviewResult(), retainedDeferredApprovals: ['A3', 'A4', 'A7'] },
+    { log: (type, detail) => log.push([type, detail]) });
+  assert.equal(state.stage, 'execute');
+  assert.equal(state.status, 'ready');
+  assert.deepEqual(state.approval.pending, []);
+  assert.deepEqual(state.approval.returned, deferred);
+  assert.deepEqual(log, [['approval_removed', { items: [item], reason: 'returned' }]]);
 });
 
 test('実行前レビューと実装の新規入力は項目の条件と旧状態の全体条件を渡す', async t => {
@@ -1456,20 +1597,35 @@ test('reviewの入力は、前後の記録とログのパスを残し、3000件�
   assert.deepEqual(state.evidence, [{ ...entry, changedFiles: files }]);
 });
 
+test('全工程の入力で文章は日本語とし、コードや引用したログは原文を使うよう指示する', t => {
+  const { state } = fixture(t);
+  for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
+    assert.match(prompt({ ...state, stage }), /summary・question・decisions・tasks・report・readinessの文章は日本語で書く。コード・パス・コマンド・識別子・引用したログは原文のまま書く。/);
+  }
+});
+
 test('20試行の大量の証拠があっても全工程の入力は要求と回答の本文を除いて2万字以下になる', t => {
   const { state } = fixture(t);
   Object.assign(state, {
     requirement: '要求の本文'.repeat(5000), answers: [{ answer: '回答の本文'.repeat(5000) }],
     tasks: [{ ...task, status: 'pending' }], taskStartAttempt: 0, evidence: largeStageEvidence(),
+    readiness: Array.from({ length: 50 }, (_, index) => ({ ...readiness, result: 'unverifiable',
+      check: `${index}:${'条件'.repeat(200)}`, source: '出典'.repeat(200) })),
   });
   for (const kind of ['request', 'change']) {
     const planningStage = kind === 'request' ? 'plan' : 'prereview';
     for (const stage of [planningStage, 'execute', 'review', 'acceptance']) {
-      const input = prompt({ ...state, kind, stage, change: kind === 'change' ? 'sample' : undefined });
+      const input = prompt({ ...state, kind, stage, change: kind === 'change' ? 'sample' : undefined,
+        readiness: kind === 'change' ? state.readiness : undefined });
       const jsonStart = input.lastIndexOf('\n') + 1;
       const context = JSON.parse(input.slice(jsonStart));
       assert.equal(context.evidence.length, kind === 'change' && stage === 'execute' ? 0 : 20);
       assert.equal(context.changedFiles.total, 60000);
+      if (kind === 'change' && stage === 'execute') {
+        assert.ok(context.readiness.length > 0 && context.readiness.length <= 20);
+        assert.deepEqual(context.readiness, state.readiness.slice(0, context.readiness.length)
+          .map(({ check, source }) => ({ check: check.slice(0, 300), source: source.slice(0, 300) })));
+      } else assert.equal(context.readiness, undefined);
       context.requirement = '';
       for (const answer of context.answers) answer.answer = '';
       const length = jsonStart + JSON.stringify(context).length;
@@ -1532,14 +1688,15 @@ test('全工程でerrorの原因区分を要求する', t => {
   }
 });
 
-test('returnToはreviewのreviseだけが差し戻し先を指定できる', () => {
+test('returnToはreviewのreviseとexecuteのquestionで戻り先を指定する', () => {
   for (const file of ['result', 'prereview']) {
     const schema = JSON.parse(readFileSync(join(root, `src/${file}.schema.json`), 'utf8'));
     assert.ok(schema.required.includes('returnTo'));
   }
   for (const stage of ['plan', 'prereview', 'execute', 'review', 'acceptance']) {
-    for (const outcome of ['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval']) {
-      const valid = stage === 'review' && outcome === 'revise' ? ['execute', 'prereview'] : ['none'];
+    for (const outcome of ['ok', 'question', 'revise', 'error', 'partial', 'permission', 'approval', 'replan']) {
+      const valid = (stage === 'review' && outcome === 'revise') || (stage === 'execute' && outcome === 'question')
+        ? ['execute', 'prereview'] : ['none'];
       for (const returnTo of [undefined, 'invalid', 'none', 'execute', 'prereview']) {
         if (valid.includes(returnTo)) continue;
         const result = { ...ok([task]), outcome, cause: outcome === 'error' ? 'environment' : '', returnTo, question: '確認', permission: { network: true, paths: [] } };
@@ -1547,9 +1704,65 @@ test('returnToはreviewのreviseだけが差し戻し先を指定できる', () 
       }
     }
   }
-  for (const returnTo of ['execute', 'prereview']) assert.equal(validateResult({ ...revise, returnTo }, 'review').returnTo, returnTo);
+  for (const returnTo of ['execute', 'prereview']) {
+    assert.equal(validateResult({ ...revise, returnTo }, 'review').returnTo, returnTo);
+    assert.equal(validateResult({ ...ok(), outcome: 'question', question: '確認', returnTo }, 'execute').returnTo, returnTo);
+  }
 });
 
+test('実行工程の質問は回答の内容に応じて計画または同じセッションから再開する', async t => {
+  for (const [kind, returnTo, nextStage, inquire] of [
+    ['change', 'prereview', 'prereview', true],
+    ['request', 'prereview', 'plan', false],
+    ['change', 'execute', 'execute', false],
+  ]) {
+    const { state, base } = fixture(t);
+    Object.assign(state, { kind, stage: 'execute', change: kind === 'change' ? 'sample-change' : undefined,
+      tasks: [{ ...task, status: 'pending' }] });
+    const question = { ...ok(), outcome: 'question', question: '今後の方針は？', returnTo };
+    await step(state, async (_current, dir) => {
+      writeFileSync(join(dir, 'invocation.json'), JSON.stringify({ sessionId: '実行セッション' }));
+      return question;
+    }, base);
+    let saved = load(state.id, base);
+    assert.equal(saved.status, 'waiting');
+    assert.equal(saved.stage, 'execute');
+    assert.equal(saved.session.sessionId, '実行セッション');
+    assert.equal(saved.answerStage, returnTo === 'prereview' ? nextStage : undefined);
+    if (inquire) {
+      answer(saved, '理由は？', base, true);
+      await step(saved, async () => ({ ...question, returnTo: 'none' }), base);
+      assert.equal(saved.answers.at(-1).deviation, 'error');
+      answer(saved, '改めて理由は？', base, true);
+      await step(saved, async () => ({ ...question, returnTo: 'execute', question: '手順が増えるためです' }), base);
+      saved = load(state.id, base);
+      assert.equal(saved.status, 'waiting');
+      assert.equal(saved.stage, 'execute');
+      assert.equal(saved.answerStage, 'prereview');
+      assert.equal(saved.question, question.question);
+      assert.equal(saved.answers.at(-1).reply, '手順が増えるためです');
+    }
+    answer(saved, 'この方針で進める', base);
+    const ready = load(state.id, base);
+    assert.equal(ready.status, 'ready');
+    assert.equal(ready.stage, nextStage);
+    assert.equal(ready.answerStage, undefined);
+    assert.equal(ready.session?.sessionId, returnTo === 'execute' ? '実行セッション' : undefined);
+    assert.match(inputFor(ready), /この方針で進める/);
+  }
+});
+
+test('実行工程の新規入力と再開入力で質問の戻り先を選ぶよう指示する', t => {
+  const { state } = fixture(t);
+  state.stage = 'execute';
+  assert.match(prompt(state), /executeのquestionでもreturnToにexecuteかprereviewを指定する/);
+  const rule = /回答で計画・タスク・受け入れ条件・承認計画・検証方法が変わるならreturnTo=prereview、同じタスクを続けられるならreturnTo=execute/;
+  assert.match(prompt(state), rule);
+  state.answers = [{ answer: '実行を続行' }];
+  state.session = { ...attemptAssignment(state), stage: state.stage, sessionId: '実行' };
+  assert.match(inputFor(state), /残りの読み取り専用の確認を続け/);
+  assert.match(inputFor(state), rule);
+});
 test('同じタスクの実装差し戻しは4回目で回答待ちになり、指示を回答すると回数が戻る', t => {
   const { state, base } = fixture(t);
   state.attempts = 1;
